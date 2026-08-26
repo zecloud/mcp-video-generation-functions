@@ -7,6 +7,7 @@ import os
 import time
 from datetime import timedelta
 from typing import Any, List
+from urllib.parse import quote
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -14,6 +15,7 @@ from AzureFunctionsMCPPydanticTool import (
     pydantic_mcp_tool_properties,
     validate_pydantic_arguments,
 )
+from mcp.types import ContentBlock, ResourceLink, TextContent
 from pydantic import BaseModel
 
 from models import (
@@ -28,6 +30,7 @@ from models import (
     RunningWorkflowResult,
 )
 from video_workflow import (
+    VIDEO_BLOB_PATH_PREFIX,
     aggregate_generation_results,
     build_generation,
     is_retryable_failure_event,
@@ -54,6 +57,10 @@ MCP_POLL_INTERVAL_SECONDS = _positive_int_setting("MCP_POLL_INTERVAL_SECONDS", 5
 ORCHESTRATION_TIMEOUT_SECONDS = _positive_int_setting(
     "ORCHESTRATION_TIMEOUT_SECONDS", 2 * 60 * 60
 )
+VIDEO_BLOB_BASE_URL = os.environ.get(
+    "VIDEO_BLOB_BASE_URL",
+    "https://fluxstorageaca.blob.core.windows.net/ltxavatarjob/agentvideo",
+).rstrip("/")
 
 
 @app.orchestration_trigger(context_name="context")
@@ -195,7 +202,7 @@ async def create_hd_video(
     ref_speaker2_filename: str,
     prompts: List[str],
     orientation: Orientation = Orientation.VERTICAL,
-) -> str:
+) -> List[ContentBlock]:
     """Démarre les générations vidéo HD en parallèle et retourne le résultat ou un workflow_id."""
     request = CreateHDVideoInput(
         videoid=videoid,
@@ -218,7 +225,7 @@ async def create_hd_video(
         wait_budget_seconds=MCP_WAIT_BUDGET_SECONDS,
         poll_interval_seconds=min(1, MCP_POLL_INTERVAL_SECONDS),
     )
-    return _serialize(result)
+    return _to_content_blocks(result)
 
 
 @app.mcp_tool()
@@ -228,10 +235,10 @@ async def create_hd_video(
 async def get_hd_video_result(
     client: df.DurableOrchestrationClient,
     workflow_id: str,
-) -> str:
+) -> List[ContentBlock]:
     """Retourne l'état et le résultat d'un workflow create_hd_video."""
     status = await client.get_status(workflow_id)
-    return _serialize(_workflow_response(status, workflow_id))
+    return _to_content_blocks(_workflow_response(status, workflow_id))
 
 
 async def _wait_for_workflow(
@@ -298,3 +305,43 @@ def _is_terminal(runtime_status: Any) -> bool:
 
 def _serialize(result: BaseModel) -> str:
     return result.model_dump_json(exclude_none=True)
+
+
+def _video_resource_uri(blob_path: str) -> str:
+    if not blob_path.startswith(VIDEO_BLOB_PATH_PREFIX):
+        raise ValueError(
+            f"Chemin blob vidéo inattendu : {blob_path!r}."
+        )
+    relative_path = blob_path.removeprefix(VIDEO_BLOB_PATH_PREFIX)
+    return f"{VIDEO_BLOB_BASE_URL}/{quote(relative_path, safe='/')}"
+
+
+def _to_content_blocks(result: BaseModel) -> List[ContentBlock]:
+    blocks: List[ContentBlock] = [
+        TextContent(type="text", text=_serialize(result))
+    ]
+    if not isinstance(result, CompletedWorkflowResult):
+        return blocks
+
+    for generation in result.result.generations:
+        if generation.status != "completed":
+            continue
+        filename = generation.blob_path.rsplit("/", 1)[-1]
+        frame_description = (
+            f", {generation.num_frames} images"
+            if generation.num_frames is not None
+            else ""
+        )
+        blocks.append(
+            ResourceLink(
+                type="resource_link",
+                uri=_video_resource_uri(generation.blob_path),
+                name=filename,
+                description=(
+                    f"Vidéo HD générée pour le prompt {generation.index + 1}"
+                    f"{frame_description}."
+                ),
+                mimeType="video/mp4",
+            )
+        )
+    return blocks

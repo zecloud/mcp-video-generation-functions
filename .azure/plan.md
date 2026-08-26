@@ -84,6 +84,7 @@ MCP tools:
 
 1. `create_hd_video`: validates input, starts the durable orchestration, waits for a short configurable MCP budget, then returns either completed results or a `workflow_id`.
 2. `get_hd_video_result`: accepts a strongly typed required `workflow_id` and returns `running`, `completed`, `failed`, or `not_found`.
+3. Both tools return `List[ContentBlock]`: a JSON `TextContent` status and, for every successful terminal generation, a `ResourceLink` with `mimeType="video/mp4"` built from `VIDEO_BLOB_BASE_URL`.
 
 ### Durable workflow
 
@@ -179,6 +180,7 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 - [x] Implement budgeted start/poll MCP tools
 - [x] Implement fan-out queue activities and parallel external-event waits
 - [x] Implement deterministic 2-hour durable timeout
+- [x] Return MCP SDK `TextContent` and `ResourceLink` blocks for polling and completed videos
 - [x] Add tests for validation, message mapping, orchestration results, failures, and timeouts
 - [x] Add local development configuration and README
 - [x] Run targeted tests, lint/type checks already provided by the project, and Functions metadata validation
@@ -211,16 +213,17 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 
 | Check | Command Run | Result | Timestamp |
 |-------|-------------|--------|-----------|
-| Python 3.13 tests | `.venv\Scripts\python.exe -m pytest -q` | 29 passed | 2026-08-26T17:25:00+02:00 |
-| Python compilation | `.venv\Scripts\python.exe -m compileall -q src tests` | Passed | 2026-08-26T16:43:00+02:00 |
-| Functions metadata | Import `function_app.app.get_functions()` under Python 3.13 | Four functions and expected MCP/Durable/Service Bus bindings discovered | 2026-08-26T16:20:00+02:00 |
-| Bicep compilation | `az bicep build --file infra\main.bicep --stdout` | Passed | 2026-08-26T16:43:00+02:00 |
-| Bicep lint | `az bicep lint --file infra\main.bicep` | Passed | 2026-08-26T16:49:00+02:00 |
-| ARM validation | `az deployment sub validate ... assignExistingResourceRoles=false` | Passed with `error: null` | 2026-08-26T16:51:00+02:00 |
-| AZD authentication/context | `azd auth login --check-status`; `az account show` | Logged in; Microsoft Azure Sponsorship / `westus3` confirmed | 2026-08-26T16:47:00+02:00 |
-| AZD preview | `azd provision --preview --no-prompt` | Passed; five creates, no existing-resource or RBAC modification | 2026-08-26T16:49:00+02:00 |
-| AZD package | `azd package api --output-path <session-artifact> --no-prompt` | Passed; clean five-file runtime package with DTS host config | 2026-08-26T16:43:00+02:00 |
-| Azure Policy review | `az policy assignment list --disable-scope-strict-match` | Only enforced `SecurityCenterBuiltIn`; no deployment restriction found | 2026-08-26T16:47:00+02:00 |
+| Rich MCP result tests | `.venv\Scripts\python.exe -m pytest tests\test_mcp_results.py tests\test_video_workflow.py -q` | 18 passed, including Azure Functions content-block serialization | 2026-08-26T21:20:00+02:00 |
+| Python 3.13 tests | `.venv\Scripts\python.exe -m pytest -q` | 33 passed | 2026-08-26T21:20:00+02:00 |
+| Python compilation | `.venv\Scripts\python.exe -m compileall -q src tests` | Passed | 2026-08-26T21:20:00+02:00 |
+| Functions metadata | Import `function_app.app.get_functions()` under Python 3.13 | Four functions and expected MCP/Durable/Service Bus bindings discovered | 2026-08-26T21:20:00+02:00 |
+| Bicep compilation | `az bicep build --file infra\main.bicep --stdout` | Passed | 2026-08-26T21:20:00+02:00 |
+| Bicep lint | `az bicep lint --file infra\main.bicep` | Passed without source warnings | 2026-08-26T21:20:00+02:00 |
+| ARM validation | `az deployment sub validate ... assignExistingResourceRoles=false` | Passed with `error: null` | 2026-08-26T21:20:00+02:00 |
+| AZD authentication/context | `azd auth login --check-status`; `az account show` | Logged in; Microsoft Azure Sponsorship / `westus3` confirmed | 2026-08-26T21:20:00+02:00 |
+| AZD preview | `azd provision --preview --no-prompt` | Passed; five creates, no existing-resource or RBAC modification | 2026-08-26T21:20:00+02:00 |
+| AZD package | `azd package api --output-path <session-artifact> --no-prompt` | Passed with DTS host config | 2026-08-26T21:20:00+02:00 |
+| Azure Policy review | `az policy assignment list --disable-scope-strict-match` | Only enforced Security Center default assignment; no deployment restriction found | 2026-08-26T21:20:00+02:00 |
 | Core Tools host | `func start --python --verbose` with Python 3.13 | Local worker in Core Tools 4.13.0 rejects Python 3.13; static metadata validation above passed | 2026-08-26T16:35:00+02:00 |
 
 **Validated by:** `azure-validate` on 2026-08-26
@@ -267,7 +270,8 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 
 ## 11. Next Step
 
-Current phase: Validated; deployment remains blocked by the explicit approval gate.
+Current phase: Validated after the rich MCP video result update; deployment
+remains blocked by the explicit approval gate.
 
 Do not invoke `azure-deploy`, provision, deploy, or modify Azure resources
 without a new explicit user approval. Existing-resource RBAC requires separate

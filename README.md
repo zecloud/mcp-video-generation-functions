@@ -12,6 +12,11 @@ collects their Durable Task Scheduler events.
 - `get_hd_video_result` accepts a required, strongly validated `workflow_id`
   and returns `running`, `completed`, `failed`, or `not_found`.
 
+Both tools return `List[ContentBlock]`. The first block is a `TextContent`
+containing the JSON status contract used for polling. A completed response also
+contains one `ResourceLink` per successful generation, with
+`mimeType="video/mp4"` and the generated video URL.
+
 Every generation result contains its prompt/index, terminal status,
 deterministic blob path, optional `num_frames`, and any error or timeout.
 Vertical videos are 720x1280; horizontal videos are 1280x720.
@@ -48,6 +53,10 @@ Durable Task Scheduler. Running the Service Bus output binding locally requires
 an Azure identity that already has sender access to the existing queue; unit
 tests do not access Azure.
 
+The runtime pins the maintained MCP SDK 1.x line because stable
+`azure-functions` 2.2 serializes its `mcp.types` content blocks natively. MCP
+SDK 2.x support requires a later Azure Functions release.
+
 ## Configuration
 
 | Setting | Default / purpose |
@@ -55,6 +64,7 @@ tests do not access Azure.
 | `MCP_WAIT_BUDGET_SECONDS` | `20`, inline MCP wait budget |
 | `MCP_POLL_INTERVAL_SECONDS` | `5`, suggested polling delay |
 | `ORCHESTRATION_TIMEOUT_SECONDS` | `7200`, durable global timeout |
+| `VIDEO_BLOB_BASE_URL` | Public base URL for generated LTX video links |
 | `SERVICE_BUS_QUEUE_NAME` | `ltx25msrjob` |
 | `ServiceBusConnection__fullyQualifiedNamespace` | Existing namespace endpoint |
 | `ServiceBusConnection__credential` | `managedidentity` |

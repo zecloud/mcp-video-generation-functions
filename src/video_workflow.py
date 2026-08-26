@@ -16,6 +16,8 @@ from models import (
     SERVICE_BUS_MESSAGE_LIMIT_BYTES,
 )
 
+VIDEO_BLOB_PATH_PREFIX = "ltxavatarjob/agentvideo/"
+
 
 ORIENTATION_DIMENSIONS: dict[Orientation, tuple[int, int]] = {
     Orientation.VERTICAL: (720, 1280),
@@ -33,7 +35,7 @@ def type_prefix_for(instance_id: str, index: int) -> str:
 
 
 def output_blob_path(videoid: str, type_prefix: str) -> str:
-    return f"ltxavatarjob/agentvideo/{videoid}/{type_prefix}-{videoid}.mp4"
+    return f"{VIDEO_BLOB_PATH_PREFIX}{videoid}/{type_prefix}-{videoid}.mp4"
 
 
 def seed_for_event_key(event_key: str) -> int:

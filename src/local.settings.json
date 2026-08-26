@@ -8,9 +8,9 @@
     "ServiceBusConnection__fullyQualifiedNamespace": "agentvideo-namespace.servicebus.windows.net",
     "ServiceBusConnection__credential": "managedidentity",
     "SERVICE_BUS_QUEUE_NAME": "ltx25msrjob",
+    "VIDEO_BLOB_BASE_URL": "https://fluxstorageaca.blob.core.windows.net/ltxavatarjob/agentvideo",
     "MCP_WAIT_BUDGET_SECONDS": "20",
     "MCP_POLL_INTERVAL_SECONDS": "5",
     "ORCHESTRATION_TIMEOUT_SECONDS": "7200"
   }
 }
-

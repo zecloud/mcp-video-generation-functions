@@ -66,6 +66,7 @@ param dtsTaskHubName string = 'default'
 param dtsEndpoint string = 'https://agentvideo-atgnfafbfvdrg.westus3.durabletask.io'
 param logAnalyticsResourceGroupName string = 'agentsdcpp'
 param logAnalyticsWorkspaceName string = 'workspaceagentsdcpp8688'
+param videoBlobBaseUrl string = 'https://fluxstorageaca.blob.${environment().suffixes.storage}/ltxavatarjob/agentvideo'
 
 @minValue(1)
 param mcpWaitBudgetSeconds int = 20
@@ -212,6 +213,7 @@ module api './app/api.bicep' = {
       MCP_WAIT_BUDGET_SECONDS: '${mcpWaitBudgetSeconds}'
       MCP_POLL_INTERVAL_SECONDS: '${mcpPollIntervalSeconds}'
       ORCHESTRATION_TIMEOUT_SECONDS: '${orchestrationTimeoutSeconds}'
+      VIDEO_BLOB_BASE_URL: videoBlobBaseUrl
     })
   }
 }
@@ -237,4 +239,3 @@ output AZURE_TENANT_ID string = tenant().tenantId
 output AZURE_RESOURCE_GROUP string = resourceGroup.name
 output SERVICE_API_NAME string = api.outputs.SERVICE_API_NAME
 output AZURE_FUNCTION_NAME string = api.outputs.SERVICE_API_NAME
-

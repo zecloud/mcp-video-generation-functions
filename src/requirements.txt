@@ -1,6 +1,6 @@
 # Do not include azure-functions-worker; the platform manages it.
-azure-functions>=2.1.0
+azure-functions>=2.2.0
 azure-functions-durable>=1.5.0
+mcp>=1.29.0,<2
 pydantic>=2.10.0,<3
 git+https://github.com/zecloud/azurefunctionsmcpydantic.git
-
