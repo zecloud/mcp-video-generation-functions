@@ -135,3 +135,40 @@ def test_orchestration_timeout_includes_dispatch_phase():
         "timeout",
         "timeout",
     ]
+
+
+def test_retryable_failure_then_timer_returns_timeout():
+    context = FakeContext()
+    context.dispatch_tasks = [
+        FakeTask("dispatch", "dispatch-0", "SUCCEEDED", {"index": 0}),
+        FakeTask("dispatch", "dispatch-1", "SUCCEEDED", {"index": 1}),
+    ]
+    generator = orchestrator_callable()(context)
+
+    request = next(generator)
+    request = generator.send(
+        next(task for task in request.tasks if task.name == "dispatch-0")
+    )
+    request = generator.send(
+        next(task for task in request.tasks if task.name == "dispatch-1")
+    )
+    retryable_event = next(task for task in request.tasks if task.kind == "event")
+    retryable_event.result = {
+        "status": "failed",
+        "event_key": "workflow-1:0:uuid-1",
+        "retryable": True,
+        "error": "temporary",
+    }
+
+    request = generator.send(retryable_event)
+    try:
+        generator.send(context.timer)
+    except StopIteration as completed:
+        output = completed.value
+    else:
+        raise AssertionError("The orchestration should have timed out.")
+
+    assert output["generations"][0]["status"] == "timeout"
+    assert output["generations"][0]["error"] == (
+        "Délai maximal de génération dépassé."
+    )

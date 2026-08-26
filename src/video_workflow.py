@@ -25,8 +25,9 @@ def ensure_png_when_extensionless(filename: str) -> str:
     return filename if PurePath(filename).suffix else f"{filename}.png"
 
 
-def type_prefix_for(index: int) -> str:
-    return f"hdvideo-{index + 1:03d}"
+def type_prefix_for(instance_id: str, index: int) -> str:
+    token = hashlib.sha256(f"{instance_id}:{index}".encode("utf-8")).hexdigest()[:10]
+    return f"hdvideo-{token}-{index + 1:03d}"
 
 
 def output_blob_path(videoid: str, type_prefix: str) -> str:
@@ -48,7 +49,7 @@ def build_generation(
 ) -> tuple[GenerationDescriptor, Ltx25Message]:
     prompt = request.prompts[index]
     width, height = ORIENTATION_DIMENSIONS[request.orientation]
-    type_prefix = type_prefix_for(index)
+    type_prefix = type_prefix_for(instance_id, index)
     descriptor = GenerationDescriptor(
         index=index,
         prompt=prompt,
@@ -105,7 +106,7 @@ def aggregate_generation_results(
     results: list[GenerationResult] = []
 
     for descriptor in descriptors:
-        if descriptor.index in timed_out_indexes and descriptor.index not in event_payloads:
+        if descriptor.index in timed_out_indexes:
             results.append(
                 GenerationResult(
                     index=descriptor.index,

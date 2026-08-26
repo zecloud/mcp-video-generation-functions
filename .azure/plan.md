@@ -91,7 +91,7 @@ MCP tools:
 2. Fan out one `enqueue_ltx25_generation` activity per prompt.
 3. Each activity sends one JSON message to the existing `ltx25msrjob` queue:
    - `videoid`, `prompt`, `pic1`, `pic2`, `width`, `height`
-   - deterministic `type_prefix`
+   - deterministic per-orchestration `type_prefix` derived from `instance_id`
    - orchestration `instance_id`
    - unique `event_key`
    - unique `dts_event_name`

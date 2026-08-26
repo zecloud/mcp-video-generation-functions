@@ -5,6 +5,7 @@ from video_workflow import (
     ensure_png_when_extensionless,
     is_retryable_failure_event,
     seed_for_event_key,
+    type_prefix_for,
 )
 
 
@@ -34,14 +35,15 @@ def test_message_mapping_vertical_and_reference_extensions():
         "pic2": "bob.jpeg",
         "width": 720,
         "height": 1280,
-        "type_prefix": "hdvideo-001",
+        "type_prefix": type_prefix_for("instance-1", 0),
         "instance_id": "instance-1",
         "event_key": "event-key-1",
         "dts_event_name": "event-name-1",
         "seed": seed_for_event_key("event-key-1"),
     }
     assert descriptor.blob_path == (
-        "ltxavatarjob/agentvideo/video-42/hdvideo-001-video-42.mp4"
+        "ltxavatarjob/agentvideo/video-42/"
+        f"{type_prefix_for('instance-1', 0)}-video-42.mp4"
     )
 
 
@@ -55,7 +57,7 @@ def test_message_mapping_horizontal():
     )
 
     assert (message.width, message.height) == (1280, 720)
-    assert message.type_prefix == "hdvideo-002"
+    assert message.type_prefix == type_prefix_for("instance-1", 1)
 
 
 def test_png_is_only_added_when_extension_is_absent():
@@ -103,7 +105,7 @@ def test_aggregation_preserves_completed_failed_and_timeout_results():
     assert result.generations[0].num_frames == 241
     assert result.generations[1].error == "GPU unavailable"
     assert result.generations[2].blob_path.endswith(
-        "/hdvideo-003-video-42.mp4"
+        f"/{type_prefix_for('instance-1', 2)}-video-42.mp4"
     )
 
 
@@ -148,3 +150,37 @@ def test_worker_failure_requires_explicit_retryable_signal():
         {"status": "failed", "event_key": "unexpected", "retryable": True},
         "expected",
     )
+
+
+def test_type_prefix_is_stable_per_workflow_and_unique_between_workflows():
+    assert type_prefix_for("workflow-a", 0) == type_prefix_for("workflow-a", 0)
+    assert type_prefix_for("workflow-a", 0) != type_prefix_for("workflow-b", 0)
+    assert type_prefix_for("workflow-a", 0) != type_prefix_for("workflow-a", 1)
+
+
+def test_timeout_overrides_retryable_intermediate_failure():
+    request = make_request()
+    descriptor = build_generation(
+        request,
+        index=0,
+        instance_id="instance-1",
+        event_key="expected",
+        dts_event_name="event-0",
+    )[0]
+
+    result = aggregate_generation_results(
+        request=request,
+        descriptors=[descriptor],
+        event_payloads={
+            0: {
+                "status": "failed",
+                "event_key": "expected",
+                "retryable": True,
+                "error": "temporary",
+            }
+        },
+        timed_out_indexes={0},
+    )
+
+    assert result.generations[0].status == "timeout"
+    assert result.generations[0].error == "Délai maximal de génération dépassé."

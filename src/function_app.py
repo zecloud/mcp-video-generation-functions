@@ -157,9 +157,7 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
     if not pending_events:
         timeout_task.cancel()
 
-    timed_out_indexes = {
-        index for index, _, _ in pending_events if index not in event_payloads
-    }
+    timed_out_indexes = {index for index, _, _ in pending_events}
     return aggregate_generation_results(
         request=request,
         descriptors=descriptors,

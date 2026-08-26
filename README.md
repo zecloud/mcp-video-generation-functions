@@ -18,6 +18,9 @@ Vertical videos are 720x1280; horizontal videos are 1280x720.
 Each queue message also carries a deterministic seed derived from its
 `event_key`, so an at-least-once activity replay produces the same video at the
 same blob path instead of racing with a randomly different generation.
+The LTX `type_prefix` includes a short stable token derived from the Durable
+instance ID and prompt index. Retries of one workflow keep the same blob path,
+while concurrent workflows for the same `videoid` write distinct blobs.
 
 ## Local validation
 
