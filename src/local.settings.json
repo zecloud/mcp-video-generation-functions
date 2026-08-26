@@ -1,0 +1,16 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "TASKHUB_NAME": "default",
+    "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": "Endpoint=http://localhost:8080;TaskHub=default;Authentication=None",
+    "ServiceBusConnection__fullyQualifiedNamespace": "agentvideo-namespace.servicebus.windows.net",
+    "ServiceBusConnection__credential": "managedidentity",
+    "SERVICE_BUS_QUEUE_NAME": "ltx25msrjob",
+    "MCP_WAIT_BUDGET_SECONDS": "20",
+    "MCP_POLL_INTERVAL_SECONDS": "5",
+    "ORCHESTRATION_TIMEOUT_SECONDS": "7200"
+  }
+}
+
