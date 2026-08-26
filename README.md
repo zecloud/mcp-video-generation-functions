@@ -22,6 +22,16 @@ The LTX `type_prefix` includes a short stable token derived from the Durable
 instance ID and prompt index. Retries of one workflow keep the same blob path,
 while concurrent workflows for the same `videoid` write distinct blobs.
 
+Transport limits are enforced on UTF-8 bytes rather than character counts:
+
+- at most 64 prompts per workflow;
+- DTS input is capped at 960 KiB, retaining 64 KiB for the orchestration wrapper;
+- each Service Bus body is capped at 252 KiB, retaining 4 KiB below the Basic
+  tier's 256 KiB limit;
+- prompt validation reserves an additional 16 KiB for generated correlation
+  fields and the JSON envelope, and the final serialized message is checked
+  again immediately before the output binding.
+
 ## Local validation
 
 Python 3.13 and Azure Functions Core Tools are expected.

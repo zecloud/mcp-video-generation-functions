@@ -1,10 +1,19 @@
-from models import CreateHDVideoInput, Orientation
+import pytest
+
+from models import (
+    CreateHDVideoInput,
+    Ltx25Message,
+    MAX_PROMPT_UTF8_BYTES,
+    Orientation,
+    SERVICE_BUS_BODY_BUDGET_BYTES,
+)
 from video_workflow import (
     aggregate_generation_results,
     build_generation,
     ensure_png_when_extensionless,
     is_retryable_failure_event,
     seed_for_event_key,
+    serialize_ltx25_message,
     type_prefix_for,
 )
 
@@ -184,3 +193,44 @@ def test_timeout_overrides_retryable_intermediate_failure():
 
     assert result.generations[0].status == "timeout"
     assert result.generations[0].error == "Délai maximal de génération dépassé."
+
+
+def test_multibyte_message_close_to_limit_is_accepted():
+    prompt = "é" * ((MAX_PROMPT_UTF8_BYTES - 1024) // 2)
+    request = CreateHDVideoInput(
+        videoid="video-42",
+        ref_speaker1_filename="alice",
+        ref_speaker2_filename="bob",
+        prompts=[prompt],
+    )
+
+    _, message = build_generation(
+        request,
+        index=0,
+        instance_id="instance-1",
+        event_key="event-key-1",
+        dts_event_name="event-name-1",
+    )
+    serialized = serialize_ltx25_message(message)
+
+    assert len(serialized.encode("utf-8")) <= SERVICE_BUS_BODY_BUDGET_BYTES
+    assert len(serialized.encode("utf-8")) > len(serialized)
+
+
+def test_final_serialized_message_over_service_bus_budget_is_rejected():
+    message = Ltx25Message(
+        videoid="video-42",
+        prompt="😀" * (SERVICE_BUS_BODY_BUDGET_BYTES // 4),
+        pic1="alice.png",
+        pic2="bob.png",
+        width=720,
+        height=1280,
+        type_prefix="hdvideo-token-001",
+        instance_id="instance-1",
+        event_key="event-key-1",
+        dts_event_name="event-name-1",
+        seed=42,
+    )
+
+    with pytest.raises(ValueError, match="limite Service Bus Basic"):
+        serialize_ltx25_message(message)

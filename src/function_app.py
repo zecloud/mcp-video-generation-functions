@@ -22,6 +22,7 @@ from models import (
     FailedWorkflowResult,
     GetHDVideoResultInput,
     HDVideoWorkflowOutput,
+    Ltx25Message,
     NotFoundWorkflowResult,
     Orientation,
     RunningWorkflowResult,
@@ -30,6 +31,7 @@ from video_workflow import (
     aggregate_generation_results,
     build_generation,
     is_retryable_failure_event,
+    serialize_ltx25_message,
 )
 
 
@@ -173,12 +175,12 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
     connection="ServiceBusConnection",
 )
 def enqueue_ltx25_generation(job: dict, message: func.Out[str]) -> dict:
-    body = job["message"]
-    message.set(json.dumps(body, ensure_ascii=False, separators=(",", ":")))
+    body = Ltx25Message.model_validate(job["message"])
+    message.set(serialize_ltx25_message(body))
     return {
         "index": job["index"],
-        "event_key": body["event_key"],
-        "dts_event_name": body["dts_event_name"],
+        "event_key": body.event_key,
+        "dts_event_name": body.dts_event_name,
     }
 
 

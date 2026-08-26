@@ -77,7 +77,7 @@ Fields:
 | `videoid` | `str` | Existing video job folder identifier |
 | `ref_speaker1_filename` | `str` | Extensionless name; `.png` is appended for LTX `pic1` |
 | `ref_speaker2_filename` | `str` | Extensionless name; `.png` is appended for LTX `pic2` |
-| `prompts` | `List[str]` | One parallel generation per non-empty prompt |
+| `prompts` | `List[str]` | 1–64 non-empty prompts; UTF-8 byte budgets protect DTS and Service Bus limits |
 | `orientation` | `Orientation` | `Vertical` = 720x1280; `Horizontal` = 1280x720 |
 
 MCP tools:
@@ -211,7 +211,7 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 
 | Check | Command Run | Result | Timestamp |
 |-------|-------------|--------|-----------|
-| Python 3.13 tests | `.venv\Scripts\python.exe -m pytest -q` | 20 passed | 2026-08-26T16:43:00+02:00 |
+| Python 3.13 tests | `.venv\Scripts\python.exe -m pytest -q` | 29 passed | 2026-08-26T17:25:00+02:00 |
 | Python compilation | `.venv\Scripts\python.exe -m compileall -q src tests` | Passed | 2026-08-26T16:43:00+02:00 |
 | Functions metadata | Import `function_app.app.get_functions()` under Python 3.13 | Four functions and expected MCP/Durable/Service Bus bindings discovered | 2026-08-26T16:20:00+02:00 |
 | Bicep compilation | `az bicep build --file infra\main.bicep --stdout` | Passed | 2026-08-26T16:43:00+02:00 |

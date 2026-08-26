@@ -12,6 +12,8 @@ from models import (
     HDVideoWorkflowOutput,
     Ltx25Message,
     Orientation,
+    SERVICE_BUS_BODY_BUDGET_BYTES,
+    SERVICE_BUS_MESSAGE_LIMIT_BYTES,
 )
 
 
@@ -37,6 +39,18 @@ def output_blob_path(videoid: str, type_prefix: str) -> str:
 def seed_for_event_key(event_key: str) -> int:
     digest = hashlib.sha256(event_key.encode("utf-8")).digest()
     return int.from_bytes(digest[:4], "big") & 0x7FFF_FFFF
+
+
+def serialize_ltx25_message(message: Ltx25Message) -> str:
+    body = message.model_dump_json()
+    body_size = len(body.encode("utf-8"))
+    if body_size > SERVICE_BUS_BODY_BUDGET_BYTES:
+        raise ValueError(
+            f"Le message LTX 2.5 occupe {body_size} octets UTF-8 ; "
+            f"le budget est {SERVICE_BUS_BODY_BUDGET_BYTES} octets "
+            f"(limite Service Bus Basic : {SERVICE_BUS_MESSAGE_LIMIT_BYTES} octets)."
+        )
+    return body
 
 
 def build_generation(
@@ -71,6 +85,7 @@ def build_generation(
         dts_event_name=dts_event_name,
         seed=seed_for_event_key(event_key),
     )
+    serialize_ltx25_message(message)
     return descriptor, message
 
 

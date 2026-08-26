@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import json
 from typing import Annotated, Any, List, Literal
 
 from pydantic import (
@@ -9,7 +10,25 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
+    model_validator,
 )
+
+
+KIBIBYTE = 1024
+DTS_INPUT_LIMIT_BYTES = 1024 * KIBIBYTE
+DTS_INPUT_SAFETY_MARGIN_BYTES = 64 * KIBIBYTE
+DTS_INPUT_BUDGET_BYTES = DTS_INPUT_LIMIT_BYTES - DTS_INPUT_SAFETY_MARGIN_BYTES
+SERVICE_BUS_MESSAGE_LIMIT_BYTES = 256 * KIBIBYTE
+SERVICE_BUS_SAFETY_MARGIN_BYTES = 4 * KIBIBYTE
+SERVICE_BUS_BODY_BUDGET_BYTES = (
+    SERVICE_BUS_MESSAGE_LIMIT_BYTES - SERVICE_BUS_SAFETY_MARGIN_BYTES
+)
+SERVICE_BUS_DYNAMIC_ENVELOPE_BUDGET_BYTES = 16 * KIBIBYTE
+MAX_PROMPT_UTF8_BYTES = (
+    SERVICE_BUS_BODY_BUDGET_BYTES
+    - SERVICE_BUS_DYNAMIC_ENVELOPE_BUDGET_BYTES
+)
+MAX_PROMPTS = 64
 
 
 NonEmptyString = Annotated[
@@ -43,6 +62,7 @@ class CreateHDVideoInput(BaseModel):
     )
     prompts: List[NonEmptyString] = Field(
         min_length=1,
+        max_length=MAX_PROMPTS,
         description="Liste non vide des prompts, avec une génération parallèle par prompt.",
     )
     orientation: Orientation = Field(
@@ -64,6 +84,51 @@ class CreateHDVideoInput(BaseModel):
             except ValueError:
                 return value
         return value
+
+    @field_validator("prompts")
+    @classmethod
+    def validate_prompt_utf8_sizes(cls, prompts: List[str]) -> List[str]:
+        for index, prompt in enumerate(prompts):
+            size = len(prompt.encode("utf-8"))
+            if size > MAX_PROMPT_UTF8_BYTES:
+                raise ValueError(
+                    f"prompts[{index}] occupe {size} octets UTF-8 ; "
+                    f"la limite est {MAX_PROMPT_UTF8_BYTES} octets."
+                )
+        return prompts
+
+    @model_validator(mode="after")
+    def validate_transport_budgets(self) -> "CreateHDVideoInput":
+        request_size = len(self.model_dump_json().encode("utf-8"))
+        if request_size > DTS_INPUT_BUDGET_BYTES:
+            raise ValueError(
+                f"L’entrée DTS occupe {request_size} octets UTF-8 ; "
+                f"le budget avec marge est {DTS_INPUT_BUDGET_BYTES} octets."
+            )
+
+        for index, prompt in enumerate(self.prompts):
+            user_content = json.dumps(
+                {
+                    "videoid": self.videoid,
+                    "prompt": prompt,
+                    "pic1": self.ref_speaker1_filename,
+                    "pic2": self.ref_speaker2_filename,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            user_content_size = len(user_content.encode("utf-8"))
+            if (
+                user_content_size
+                > SERVICE_BUS_BODY_BUDGET_BYTES
+                - SERVICE_BUS_DYNAMIC_ENVELOPE_BUDGET_BYTES
+            ):
+                raise ValueError(
+                    f"Le contenu utilisateur du message prompts[{index}] occupe "
+                    f"{user_content_size} octets UTF-8 ; il ne laisse pas la marge "
+                    "requise pour l’enveloppe Service Bus."
+                )
+        return self
 
 
 class GetHDVideoResultInput(BaseModel):
