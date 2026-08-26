@@ -130,16 +130,21 @@ def test_aggregation_rejects_mismatched_event_key():
     assert "corrélation" in result.generations[0].error
 
 
-def test_worker_failure_is_retryable_only_with_matching_event_key():
+def test_worker_failure_requires_explicit_retryable_signal():
     assert is_retryable_failure_event(
-        {"status": "failed", "event_key": "expected", "error": "temporary"},
+        {
+            "status": "failed",
+            "event_key": "expected",
+            "error": "temporary",
+            "retryable": True,
+        },
         "expected",
     )
     assert not is_retryable_failure_event(
-        {"status": "completed", "event_key": "expected"},
+        {"status": "failed", "event_key": "expected", "error": "terminal"},
         "expected",
     )
     assert not is_retryable_failure_event(
-        {"status": "failed", "event_key": "unexpected"},
+        {"status": "failed", "event_key": "unexpected", "retryable": True},
         "expected",
     )

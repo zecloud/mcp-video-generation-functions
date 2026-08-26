@@ -79,7 +79,7 @@ def orchestrator_callable():
     return inspect.getclosurevars(durable_wrapper).nonlocals["fn"]
 
 
-def test_orchestrator_keeps_successful_dispatch_and_rearms_worker_failure():
+def test_orchestrator_keeps_successful_dispatch_and_completes_worker_failure():
     context = FakeContext()
     generator = orchestrator_callable()(context)
 
@@ -99,20 +99,11 @@ def test_orchestrator_keeps_successful_dispatch_and_rearms_worker_failure():
     first_event.result = {
         "status": "failed",
         "event_key": "workflow-1:1:uuid-3",
-        "error": "temporary GPU error",
-    }
-
-    request = generator.send(first_event)
-    retry_event = next(task for task in request.tasks if task.kind == "event")
-    assert retry_event is not first_event
-    retry_event.result = {
-        "status": "completed",
-        "event_key": "workflow-1:1:uuid-3",
-        "num_frames": 121,
+        "error": "terminal GPU error",
     }
 
     try:
-        generator.send(retry_event)
+        generator.send(first_event)
     except StopIteration as completed:
         output = completed.value
     else:
@@ -120,10 +111,11 @@ def test_orchestrator_keeps_successful_dispatch_and_rearms_worker_failure():
 
     assert [item["status"] for item in output["generations"]] == [
         "failed",
-        "completed",
+        "failed",
     ]
     assert "Service Bus" in output["generations"][0]["error"]
-    assert output["generations"][1]["num_frames"] == 121
+    assert output["generations"][1]["error"] == "terminal GPU error"
+    assert len(context.event_tasks) == 1
     assert context.timer.cancelled
 
 

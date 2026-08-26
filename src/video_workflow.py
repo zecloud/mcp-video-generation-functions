@@ -91,6 +91,7 @@ def is_retryable_failure_event(payload: Any, expected_event_key: str) -> bool:
     return (
         decoded.get("event_key") == expected_event_key
         and str(decoded.get("status", "")).strip().lower() == "failed"
+        and decoded.get("retryable") is True
     )
 
 
