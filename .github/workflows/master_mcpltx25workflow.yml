@@ -35,7 +35,10 @@ jobs:
           source venv/bin/activate
 
       - name: Install dependencies
-        run: pip install -r ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}requirements.txt
+        run: |
+          source venv/bin/activate
+          REQ_DIR="${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}"
+          python -m pip install -r "${REQ_DIR%/}/requirements.txt"
 
       # Optional: Add step to run tests here
 
