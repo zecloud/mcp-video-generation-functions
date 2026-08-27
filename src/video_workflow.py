@@ -20,8 +20,8 @@ VIDEO_BLOB_PATH_PREFIX = "ltxavatarjob/agentvideo/"
 
 
 ORIENTATION_DIMENSIONS: dict[Orientation, tuple[int, int]] = {
-    Orientation.VERTICAL: (720, 1280),
-    Orientation.HORIZONTAL: (1280, 720),
+    Orientation.VERTICAL: (704, 1280),
+    Orientation.HORIZONTAL: (1280, 704),
 }
 
 
