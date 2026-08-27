@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: 'src/' # set this to the path to your web app project, defaults to the repository root
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: 'function-package/'
   PYTHON_VERSION: '3.14' # set this to the python version to use (supports 3.6, 3.7, 3.8)
 
 jobs:
@@ -29,25 +29,33 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      #- name: Create and start virtual environment
-      #  run: |
-      #    python -m venv venv
-      #    source venv/bin/activate
+      - name: Validate Durable Task Scheduler configuration
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
 
-      #- name: Install dependencies
-      #  run: |
-
-      #    source venv/bin/activate
-
-      #    REQ_DIR="${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}"
-
-      #    python -m pip install -r "${REQ_DIR%/}/requirements.txt"
-
-
-      # Optional: Add step to run tests here
+          host = json.loads(Path("src/host.json").read_text())
+          provider = host["extensions"]["durableTask"]["storageProvider"]
+          assert provider == {
+              "type": "azureManaged",
+              "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
+          }
+          PY
 
       - name: Zip artifact for deployment
-        run: zip release.zip ./src/* -r
+        run: |
+          mkdir "${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}"
+          rsync -a \
+            --exclude='.funcignore' \
+            --exclude='.venv/' \
+            --exclude='__pycache__/' \
+            --exclude='*.pyc' \
+            --exclude='local.settings.json' \
+            --exclude='tests/' \
+            src/ "${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}"
+          (cd "${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}" && zip -r ../release.zip .)
+          test ! -e "${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/local.settings.json"
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
@@ -55,7 +63,6 @@ jobs:
           name: python-app
           path: |
             release.zip
-            !venv/
 
   deploy:
     runs-on: ubuntu-latest
@@ -72,9 +79,10 @@ jobs:
 
       - name: Unzip artifact for deployment
         run: |
-          unzip release.zip
+          mkdir "${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}"
+          unzip release.zip -d "${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}"
           rm release.zip
-        
+
       - name: Login to Azure
         uses: azure/login@v2
         with:
@@ -91,4 +99,3 @@ jobs:
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
           sku: flexconsumption
           remote-build: true
-          
