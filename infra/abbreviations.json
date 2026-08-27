@@ -1,0 +1,9 @@
+{
+  "insightsComponents": "appi-",
+  "managedIdentityUserAssignedIdentities": "id-",
+  "resourcesResourceGroups": "rg-",
+  "storageStorageAccounts": "st",
+  "webServerFarms": "plan-",
+  "webSitesFunctions": "func-"
+}
+

@@ -1,6 +1,6 @@
 # Azure Deployment Plan
 
-> **Status:** Approved
+> **Status:** Validated
 >
 > **Deployment gate:** Never provision, deploy, or modify Azure resources without the user's explicit approval immediately before the operation.
 
@@ -77,13 +77,14 @@ Fields:
 | `videoid` | `str` | Existing video job folder identifier |
 | `ref_speaker1_filename` | `str` | Extensionless name; `.png` is appended for LTX `pic1` |
 | `ref_speaker2_filename` | `str` | Extensionless name; `.png` is appended for LTX `pic2` |
-| `prompts` | `List[str]` | One parallel generation per non-empty prompt |
+| `prompts` | `List[str]` | 1–64 non-empty prompts; UTF-8 byte budgets protect DTS and Service Bus limits |
 | `orientation` | `Orientation` | `Vertical` = 720x1280; `Horizontal` = 1280x720 |
 
 MCP tools:
 
 1. `create_hd_video`: validates input, starts the durable orchestration, waits for a short configurable MCP budget, then returns either completed results or a `workflow_id`.
 2. `get_hd_video_result`: accepts a strongly typed required `workflow_id` and returns `running`, `completed`, `failed`, or `not_found`.
+3. Both tools return `List[ContentBlock]`: a JSON `TextContent` status and, for every successful terminal generation, a `ResourceLink` with `mimeType="video/mp4"` built from `VIDEO_BLOB_BASE_URL`.
 
 ### Durable workflow
 
@@ -91,7 +92,7 @@ MCP tools:
 2. Fan out one `enqueue_ltx25_generation` activity per prompt.
 3. Each activity sends one JSON message to the existing `ltx25msrjob` queue:
    - `videoid`, `prompt`, `pic1`, `pic2`, `width`, `height`
-   - deterministic `type_prefix`
+   - deterministic per-orchestration `type_prefix` derived from `instance_id`
    - orchestration `instance_id`
    - unique `event_key`
    - unique `dts_event_name`
@@ -171,24 +172,33 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 
 ### Phase 2: Execution
 
-- [ ] Initialize the official Python Azure Functions AZD template
-- [ ] Compose MCP source/storage settings
-- [ ] Compose Durable Functions with existing DTS resources
-- [ ] Compose Service Bus sender integration with existing queue
-- [ ] Implement Pydantic models and MCP decorators
-- [ ] Implement budgeted start/poll MCP tools
-- [ ] Implement fan-out queue activities and parallel external-event waits
-- [ ] Implement deterministic 2-hour durable timeout
-- [ ] Add tests for validation, message mapping, orchestration results, failures, and timeouts
-- [ ] Add local development configuration and README
-- [ ] Run targeted tests, lint/type checks already provided by the project, and Functions metadata validation
-- [ ] Update plan status to `Ready for Validation`
+- [x] Initialize the official Python Azure Functions AZD template
+- [x] Compose MCP source/storage settings
+- [x] Compose Durable Functions with existing DTS resources
+- [x] Compose Service Bus sender integration with existing queue
+- [x] Implement Pydantic models and MCP decorators
+- [x] Implement budgeted start/poll MCP tools
+- [x] Implement fan-out queue activities and parallel external-event waits
+- [x] Implement deterministic 2-hour durable timeout
+- [x] Return MCP SDK `TextContent` and `ResourceLink` blocks for polling and completed videos
+- [x] Add tests for validation, message mapping, orchestration results, failures, and timeouts
+- [x] Add local development configuration and README
+- [x] Run targeted tests, lint/type checks already provided by the project, and Functions metadata validation
+- [x] Update plan status to `Ready for Validation`
 
 ### Phase 3: Validation
 
-- [ ] Invoke `azure-validate`
-- [ ] Record validation proof
-- [ ] Update plan status to `Validated`
+- [x] Invoke `azure-validate`
+- [x] All validation checks pass
+  - [x] AZD installation and `azure.yaml` schema
+  - [x] AZD environment, authentication, subscription, and location
+  - [x] Bicep compilation and lint
+  - [x] Read-only AZD provision preview
+  - [x] Python 3.13 build and targeted tests
+  - [x] AZD package validation
+  - [x] Read-only Azure Policy review
+- [x] Record validation proof
+- [x] Update plan status to `Validated`
 
 ### Phase 4: Deployment
 
@@ -203,9 +213,20 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 
 | Check | Command Run | Result | Timestamp |
 |-------|-------------|--------|-----------|
-| Pending | Pending execution | Pending | Pending |
+| Rich MCP result tests | `.venv\Scripts\python.exe -m pytest tests\test_mcp_results.py tests\test_video_workflow.py -q` | 18 passed, including Azure Functions content-block serialization | 2026-08-26T21:20:00+02:00 |
+| Python 3.13 tests | `.venv\Scripts\python.exe -m pytest -q` | 33 passed | 2026-08-26T21:20:00+02:00 |
+| Python compilation | `.venv\Scripts\python.exe -m compileall -q src tests` | Passed | 2026-08-26T21:20:00+02:00 |
+| Functions metadata | Import `function_app.app.get_functions()` under Python 3.13 | Four functions and expected MCP/Durable/Service Bus bindings discovered | 2026-08-26T21:20:00+02:00 |
+| Bicep compilation | `az bicep build --file infra\main.bicep --stdout` | Passed | 2026-08-26T21:20:00+02:00 |
+| Bicep lint | `az bicep lint --file infra\main.bicep` | Passed without source warnings | 2026-08-26T21:20:00+02:00 |
+| ARM validation | `az deployment sub validate ... assignExistingResourceRoles=false` | Passed with `error: null` | 2026-08-26T21:20:00+02:00 |
+| AZD authentication/context | `azd auth login --check-status`; `az account show` | Logged in; Microsoft Azure Sponsorship / `westus3` confirmed | 2026-08-26T21:20:00+02:00 |
+| AZD preview | `azd provision --preview --no-prompt` | Passed; five creates, no existing-resource or RBAC modification | 2026-08-26T21:20:00+02:00 |
+| AZD package | `azd package api --output-path <session-artifact> --no-prompt` | Passed with DTS host config | 2026-08-26T21:20:00+02:00 |
+| Azure Policy review | `az policy assignment list --disable-scope-strict-match` | Only enforced Security Center default assignment; no deployment restriction found | 2026-08-26T21:20:00+02:00 |
+| Core Tools host | `func start --python --verbose` with Python 3.13 | Local worker in Core Tools 4.13.0 rejects Python 3.13; static metadata validation above passed | 2026-08-26T16:35:00+02:00 |
 
-**Validated by:** Pending `azure-validate`
+**Validated by:** `azure-validate` on 2026-08-26
 
 ---
 
@@ -214,19 +235,44 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 | File | Purpose | Status |
 |------|---------|--------|
 | `.azure/plan.md` | Approved architecture and execution source of truth | Complete |
-| `azure.yaml` | AZD service and deployment hooks | Pending |
-| `infra/` | Secure Bicep composition and existing-resource references | Pending |
-| `src/function_app.py` | MCP tools, orchestrator, activities | Pending |
-| `src/models.py` | Pydantic input/result models and enums | Pending |
-| `src/host.json` | MCP and DTS extension configuration | Pending |
-| `src/requirements.txt` | Runtime dependencies | Pending |
-| `tests/` | Unit and orchestration contract tests | Pending |
-| `README.md` | Local use, MCP tools, configuration, and deployment gate | Pending |
+| `azure.yaml` | AZD service and deployment hooks | Complete |
+| `infra/` | Secure Bicep composition and existing-resource references | Complete |
+| `src/function_app.py` | MCP tools, orchestrator, activities | Complete |
+| `src/models.py` | Pydantic input/result models and enums | Complete |
+| `src/host.json` | MCP and DTS extension configuration | Complete |
+| `src/requirements.txt` | Runtime dependencies | Complete |
+| `tests/` | Unit and orchestration contract tests | Complete |
+| `README.md` | Local use, MCP tools, configuration, and deployment gate | Complete |
 
 ---
 
-## 10. Next Step
+## 10. Research Summary
 
-Current phase: Approved for implementation.
+- Base project: official `Azure-Samples/functions-quickstart-python-http-azd`
+  template, preserving the Flex Consumption/UAMI/AVM composition.
+- MCP/Durable pattern: official
+  `Azure-Samples/mcp-functions-long-running-tools-python` sample, including the
+  preview extension bundle, budgeted wait, polling contract and DTS packaging
+  swap.
+- Typed MCP metadata and validation:
+  `zecloud/azurefunctionsmcpydantic` decorators, with
+  `@app.mcp_tool()` outermost and strict Pydantic validation.
+- Service Bus: Python v2 output binding with the identity-based
+  `fullyQualifiedNamespace`, `credential` and `clientId` settings and the
+  `Azure Service Bus Data Sender` role.
+- LTX event payload verified against
+  `zecloud/func_tts_eurovibe/ltx25/function_app.py`: terminal events expose
+  `status`, `event_key`, `type_prefix`, optional `num_frames`, and `error`.
+- Existing Service Bus, DTS/task hub and Log Analytics resources are declared
+  with Bicep `existing`; their RBAC assignments are gated off by default.
 
-Start the coding sub-session. Do not deploy or modify Azure resources without a new explicit user approval.
+---
+
+## 11. Next Step
+
+Current phase: Validated after the rich MCP video result update; deployment
+remains blocked by the explicit approval gate.
+
+Do not invoke `azure-deploy`, provision, deploy, or modify Azure resources
+without a new explicit user approval. Existing-resource RBAC requires separate
+approval even after deployment approval.

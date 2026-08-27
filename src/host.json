@@ -1,0 +1,26 @@
+{
+  "version": "2.0",
+  "logging": {
+    "applicationInsights": {
+      "samplingSettings": {
+        "isEnabled": true,
+        "excludedTypes": "Request"
+      }
+    }
+  },
+  "extensions": {
+    "mcp": {
+      "instructions": "Utilisez create_hd_video pour démarrer les générations HD. Si le statut est running, attendez poll_after_seconds puis appelez get_hd_video_result avec le workflow_id retourné.",
+      "serverName": "HDVideoGeneration",
+      "serverVersion": "1.0.0"
+    },
+    "durableTask": {
+      "hubName": "%TASKHUB_NAME%"
+    }
+  },
+  "extensionBundle": {
+    "id": "Microsoft.Azure.Functions.ExtensionBundle.Preview",
+    "version": "[4.*, 5.0.0)"
+  }
+}
+
