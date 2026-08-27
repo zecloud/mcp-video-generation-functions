@@ -223,7 +223,7 @@ async def create_hd_video(
         client,
         instance_id,
         wait_budget_seconds=MCP_WAIT_BUDGET_SECONDS,
-        poll_interval_seconds=min(1, MCP_POLL_INTERVAL_SECONDS),
+        poll_interval_seconds=MCP_POLL_INTERVAL_SECONDS,
     )
     return _to_content_blocks(result)
 
