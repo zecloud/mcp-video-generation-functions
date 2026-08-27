@@ -268,11 +268,18 @@ def _workflow_response(status: Any, workflow_id: str) -> BaseModel:
     instance_id = status.instance_id or workflow_id
     if runtime_name == "Completed":
         output = status.output
-        if isinstance(output, str):
-            output = json.loads(output)
+        try:
+            if isinstance(output, str):
+                output = json.loads(output)
+            workflow_output = HDVideoWorkflowOutput.model_validate(output)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            return FailedWorkflowResult(
+                workflow_id=instance_id,
+                error=f"Résultat d’orchestration invalide : {exc}",
+            )
         return CompletedWorkflowResult(
             workflow_id=instance_id,
-            result=HDVideoWorkflowOutput.model_validate(output),
+            result=workflow_output,
         )
     if runtime_name in {"Failed", "Terminated", "Canceled"}:
         detail = status.output
