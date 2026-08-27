@@ -181,6 +181,7 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 - [x] Implement fan-out queue activities and parallel external-event waits
 - [x] Implement deterministic 2-hour durable timeout
 - [x] Return MCP SDK `TextContent` and `ResourceLink` blocks for polling and completed videos
+- [x] Use one DTS-enabled `host.json` for AZD and GitHub Actions deployments
 - [x] Add tests for validation, message mapping, orchestration results, failures, and timeouts
 - [x] Add local development configuration and README
 - [x] Run targeted tests, lint/type checks already provided by the project, and Functions metadata validation
@@ -214,6 +215,7 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 | Check | Command Run | Result | Timestamp |
 |-------|-------------|--------|-----------|
 | Rich MCP result tests | `.venv\Scripts\python.exe -m pytest tests\test_mcp_results.py tests\test_video_workflow.py -q` | 18 passed, including Azure Functions content-block serialization | 2026-08-26T21:20:00+02:00 |
+| DTS host deployment package | `.venv\Scripts\python.exe -m pytest -q`; `azd package api ...`; inspect packaged `host.json` | 36 passed; package uses `azureManaged`; `local.settings.json` absent | 2026-08-27T17:40:00+02:00 |
 | Python 3.13 tests | `.venv\Scripts\python.exe -m pytest -q` | 33 passed | 2026-08-26T21:20:00+02:00 |
 | Python compilation | `.venv\Scripts\python.exe -m compileall -q src tests` | Passed | 2026-08-26T21:20:00+02:00 |
 | Functions metadata | Import `function_app.app.get_functions()` under Python 3.13 | Four functions and expected MCP/Durable/Service Bus bindings discovered | 2026-08-26T21:20:00+02:00 |

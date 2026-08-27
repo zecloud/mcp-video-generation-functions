@@ -47,11 +47,14 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\python -m pytest -q
 ```
 
-`src/local.settings.json` contains no secret. Azurite is used for local Durable
-state. The DTS emulator can instead be started on port 8080 as documented by
-Durable Task Scheduler. Running the Service Bus output binding locally requires
-an Azure identity that already has sender access to the existing queue; unit
-tests do not access Azure.
+`src/local.settings.json` contains no secret. Start the Durable Task Scheduler
+emulator on port 8080 before running the Function App locally. The same
+`src/host.json` selects DTS locally and in every deployment path, preventing a
+CI package from silently falling back to the Azure Storage provider. Running
+the Service Bus output binding locally requires an Azure identity that already
+has sender access to the existing queue; unit tests do not access Azure.
+`local.settings.json` is excluded from both AZD and GitHub Actions deployment
+packages.
 
 The runtime pins the maintained MCP SDK 1.x line because stable
 `azure-functions` 2.2 serializes its `mcp.types` content blocks natively. MCP

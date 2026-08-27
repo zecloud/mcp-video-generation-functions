@@ -8,22 +8,3 @@ services:
     project: ./src/
     language: python
     host: function
-
-# Local development uses Azurite for Durable state. Packaging swaps in the
-# Durable Task Scheduler configuration and restores the working tree afterward.
-hooks:
-  prepackage:
-    posix:
-      shell: sh
-      run: cp src/host.json src/host.json.bak && cp src/host.dts.json src/host.json
-    windows:
-      shell: pwsh
-      run: Copy-Item src/host.json src/host.json.bak -Force; Copy-Item src/host.dts.json src/host.json -Force
-  postpackage:
-    posix:
-      shell: sh
-      run: mv src/host.json.bak src/host.json
-    windows:
-      shell: pwsh
-      run: Move-Item src/host.json.bak src/host.json -Force
-

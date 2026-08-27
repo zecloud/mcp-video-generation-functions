@@ -5,8 +5,6 @@ __pycache__
 __azurite_db*__.json
 __blobstorage__
 __queuestorage__
-host.dts.json
-host.json.bak
 local.settings.json
 tests
 .venv

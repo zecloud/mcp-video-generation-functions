@@ -15,7 +15,11 @@
       "serverVersion": "1.0.0"
     },
     "durableTask": {
-      "hubName": "%TASKHUB_NAME%"
+      "hubName": "%TASKHUB_NAME%",
+      "storageProvider": {
+        "type": "azureManaged",
+        "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING"
+      }
     }
   },
   "extensionBundle": {
@@ -23,4 +27,3 @@
     "version": "[4.*, 5.0.0)"
   }
 }
-
