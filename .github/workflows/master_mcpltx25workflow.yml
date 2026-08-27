@@ -29,21 +29,25 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Create and start virtual environment
-        run: |
-          python -m venv venv
-          source venv/bin/activate
+      #- name: Create and start virtual environment
+      #  run: |
+      #    python -m venv venv
+      #    source venv/bin/activate
 
-      - name: Install dependencies
-        run: |
-          source venv/bin/activate
-          REQ_DIR="${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}"
-          python -m pip install -r "${REQ_DIR%/}/requirements.txt"
+      #- name: Install dependencies
+      #  run: |
+
+      #    source venv/bin/activate
+
+      #    REQ_DIR="${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}"
+
+      #    python -m pip install -r "${REQ_DIR%/}/requirements.txt"
+
 
       # Optional: Add step to run tests here
 
       - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
+        run: zip release.zip ./src/* -r
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
@@ -85,4 +89,6 @@ jobs:
           app-name: 'mcpltx25workflow'
           slot-name: 'Production'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+          sku: flexconsumption
+          remote-build: true
           
