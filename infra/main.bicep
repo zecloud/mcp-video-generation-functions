@@ -66,7 +66,9 @@ param dtsTaskHubName string = 'default'
 param dtsEndpoint string = 'https://agentvideo-atgnfafbfvdrg.westus3.durabletask.io'
 param logAnalyticsResourceGroupName string = 'agentsdcpp'
 param logAnalyticsWorkspaceName string = 'workspaceagentsdcpp8688'
-param videoBlobBaseUrl string = 'https://fluxstorageaca.blob.${environment().suffixes.storage}/ltxavatarjob/agentvideo'
+param videoStorageResourceGroupName string = 'agentsdcpp'
+param videoStorageAccountName string = 'fluxstorageaca'
+param videoBlobBaseUrl string = 'https://${videoStorageAccountName}.blob.${environment().suffixes.storage}/ltxavatarjob/agentvideo'
 
 @minValue(1)
 param mcpWaitBudgetSeconds int = 20
@@ -74,6 +76,9 @@ param mcpWaitBudgetSeconds int = 20
 param mcpPollIntervalSeconds int = 5
 @minValue(1)
 param orchestrationTimeoutSeconds int = 7200
+@minValue(1)
+@maxValue(86400)
+param videoSasTtlSeconds int = 3600
 
 var abbrs = loadJsonContent('./abbreviations.json')
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
@@ -166,6 +171,8 @@ module existingDependencies './app/existing-dependencies.bicep' = {
     dtsEndpoint: dtsEndpoint
     logAnalyticsResourceGroupName: logAnalyticsResourceGroupName
     logAnalyticsWorkspaceName: logAnalyticsWorkspaceName
+    videoStorageResourceGroupName: videoStorageResourceGroupName
+    videoStorageAccountName: videoStorageAccountName
   }
 }
 
@@ -214,6 +221,7 @@ module api './app/api.bicep' = {
       MCP_POLL_INTERVAL_SECONDS: '${mcpPollIntervalSeconds}'
       ORCHESTRATION_TIMEOUT_SECONDS: '${orchestrationTimeoutSeconds}'
       VIDEO_BLOB_BASE_URL: videoBlobBaseUrl
+      VIDEO_SAS_TTL_SECONDS: '${videoSasTtlSeconds}'
     })
   }
 }

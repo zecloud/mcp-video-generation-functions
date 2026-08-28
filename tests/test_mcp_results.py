@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from azure.functions import mcp as functions_mcp
 from function_app import (
     _to_content_blocks,
-    _video_resource_uri,
     _wait_for_workflow,
     _workflow_response,
 )
@@ -66,6 +65,21 @@ def mixed_workflow_output():
         }
     )
     return output
+
+
+async def fake_sas_uri_provider(blob_paths, *, base_url, ttl_seconds):
+    assert base_url == (
+        "https://fluxstorageaca.blob.core.windows.net/"
+        "ltxavatarjob/agentvideo"
+    )
+    assert ttl_seconds == 3600
+    return {
+        path: (
+            f"{base_url}/{path.removeprefix('ltxavatarjob/agentvideo/')}"
+            "?sp=r&sig=test-signature"
+        )
+        for path in blob_paths
+    }
 
 
 def test_completed_polling_result_is_strongly_typed():
@@ -131,7 +145,9 @@ def test_completed_result_returns_text_and_video_resource_links():
         "workflow-1",
     )
 
-    blocks = _to_content_blocks(result)
+    blocks = asyncio.run(
+        _to_content_blocks(result, sas_uri_provider=fake_sas_uri_provider)
+    )
 
     assert len(blocks) == 2
     assert isinstance(blocks[0], TextContent)
@@ -141,6 +157,7 @@ def test_completed_result_returns_text_and_video_resource_links():
     assert str(blocks[1].uri) == (
         "https://fluxstorageaca.blob.core.windows.net/"
         "ltxavatarjob/agentvideo/video-42/hdvideo-001-video-42.mp4"
+        "?sp=r&sig=test-signature"
     )
     assert blocks[1].name == "hdvideo-001-video-42.mp4"
 
@@ -155,9 +172,10 @@ def test_azure_functions_serializes_rich_content_block_list():
         "workflow-1",
     )
 
-    encoded = functions_mcp._MCPToolTriggerConverter.encode(
-        _to_content_blocks(result)
+    blocks = asyncio.run(
+        _to_content_blocks(result, sas_uri_provider=fake_sas_uri_provider)
     )
+    encoded = functions_mcp._MCPToolTriggerConverter.encode(blocks)
     payload = json.loads(encoded.value)
 
     assert payload[0]["type"] == "text"
@@ -166,6 +184,7 @@ def test_azure_functions_serializes_rich_content_block_list():
         "uri": (
             "https://fluxstorageaca.blob.core.windows.net/"
             "ltxavatarjob/agentvideo/video-42/hdvideo-001-video-42.mp4"
+            "?sp=r&sig=test-signature"
         ),
         "description": "Vidéo HD générée pour le prompt 1, 121 images.",
         "mimeType": "video/mp4",
@@ -174,22 +193,15 @@ def test_azure_functions_serializes_rich_content_block_list():
 
 
 def test_running_result_returns_json_text_without_resource_link():
-    blocks = _to_content_blocks(
-        _workflow_response(
-            DurableStatus(RuntimeStatus("Running"), "workflow-1"),
-            "workflow-1",
+    blocks = asyncio.run(
+        _to_content_blocks(
+            _workflow_response(
+                DurableStatus(RuntimeStatus("Running"), "workflow-1"),
+                "workflow-1",
+            )
         )
     )
 
     assert len(blocks) == 1
     assert isinstance(blocks[0], TextContent)
     assert '"status":"running"' in blocks[0].text
-
-
-def test_video_resource_uri_encodes_blob_path_segments():
-    assert _video_resource_uri(
-        "ltxavatarjob/agentvideo/vidéo 42/fichier final.mp4"
-    ) == (
-        "https://fluxstorageaca.blob.core.windows.net/ltxavatarjob/agentvideo/"
-        "vid%C3%A9o%2042/fichier%20final.mp4"
-    )

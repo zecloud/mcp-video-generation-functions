@@ -6,8 +6,7 @@ import logging
 import os
 import time
 from datetime import timedelta
-from typing import Any, List
-from urllib.parse import quote
+from typing import Any, Awaitable, Callable, List
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -29,8 +28,12 @@ from models import (
     Orientation,
     RunningWorkflowResult,
 )
+from video_access import (
+    DEFAULT_VIDEO_SAS_TTL_SECONDS,
+    MAX_VIDEO_SAS_TTL_SECONDS,
+    generate_video_sas_uris,
+)
 from video_workflow import (
-    VIDEO_BLOB_PATH_PREFIX,
     aggregate_generation_results,
     build_generation,
     is_retryable_failure_event,
@@ -61,6 +64,16 @@ VIDEO_BLOB_BASE_URL = os.environ.get(
     "VIDEO_BLOB_BASE_URL",
     "https://fluxstorageaca.blob.core.windows.net/ltxavatarjob/agentvideo",
 ).rstrip("/")
+VIDEO_SAS_TTL_SECONDS = _positive_int_setting(
+    "VIDEO_SAS_TTL_SECONDS",
+    DEFAULT_VIDEO_SAS_TTL_SECONDS,
+)
+if VIDEO_SAS_TTL_SECONDS > MAX_VIDEO_SAS_TTL_SECONDS:
+    raise ValueError(
+        f"VIDEO_SAS_TTL_SECONDS ne doit pas dépasser {MAX_VIDEO_SAS_TTL_SECONDS}."
+    )
+
+SasUriProvider = Callable[..., Awaitable[dict[str, str]]]
 
 
 @app.orchestration_trigger(context_name="context")
@@ -243,7 +256,7 @@ async def create_hd_video(
         wait_budget_seconds=MCP_WAIT_BUDGET_SECONDS,
         poll_interval_seconds=MCP_POLL_INTERVAL_SECONDS,
     )
-    return _to_content_blocks(result)
+    return await _to_content_blocks(result)
 
 
 @app.mcp_tool()
@@ -256,7 +269,7 @@ async def get_hd_video_result(
 ) -> List[ContentBlock]:
     """Retourne l'état et le résultat d'un workflow create_hd_video."""
     status = await client.get_status(workflow_id)
-    return _to_content_blocks(_workflow_response(status, workflow_id))
+    return await _to_content_blocks(_workflow_response(status, workflow_id))
 
 
 async def _wait_for_workflow(
@@ -332,25 +345,34 @@ def _serialize(result: BaseModel) -> str:
     return result.model_dump_json(exclude_none=True)
 
 
-def _video_resource_uri(blob_path: str) -> str:
-    if not blob_path.startswith(VIDEO_BLOB_PATH_PREFIX):
-        raise ValueError(
-            f"Chemin blob vidéo inattendu : {blob_path!r}."
-        )
-    relative_path = blob_path.removeprefix(VIDEO_BLOB_PATH_PREFIX)
-    return f"{VIDEO_BLOB_BASE_URL}/{quote(relative_path, safe='/')}"
-
-
-def _to_content_blocks(result: BaseModel) -> List[ContentBlock]:
+async def _to_content_blocks(
+    result: BaseModel,
+    *,
+    sas_uri_provider: SasUriProvider | None = None,
+) -> List[ContentBlock]:
     blocks: List[ContentBlock] = [
         TextContent(type="text", text=_serialize(result))
     ]
     if not isinstance(result, CompletedWorkflowResult):
         return blocks
 
-    for generation in result.result.generations:
-        if generation.status != "completed":
-            continue
+    completed_generations = [
+        generation
+        for generation in result.result.generations
+        if generation.status == "completed"
+    ]
+provider = sas_uri_provider or generate_video_sas_uris
+try:
+    sas_uris = await provider(
+        [generation.blob_path for generation in completed_generations],
+        base_url=VIDEO_BLOB_BASE_URL,
+        ttl_seconds=VIDEO_SAS_TTL_SECONDS,
+    )
+except Exception:
+    logging.exception("Échec de génération des SAS vidéo; retour uniquement du statut.")
+    return blocks
+
+    for generation in completed_generations:
         filename = generation.blob_path.rsplit("/", 1)[-1]
         frame_description = (
             f", {generation.num_frames} images"
@@ -360,7 +382,7 @@ def _to_content_blocks(result: BaseModel) -> List[ContentBlock]:
         blocks.append(
             ResourceLink(
                 type="resource_link",
-                uri=_video_resource_uri(generation.blob_path),
+                uri=sas_uris[generation.blob_path],
                 name=filename,
                 description=(
                     f"Vidéo HD générée pour le prompt {generation.index + 1}"
