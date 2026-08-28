@@ -69,7 +69,9 @@ VIDEO_SAS_TTL_SECONDS = _positive_int_setting(
     DEFAULT_VIDEO_SAS_TTL_SECONDS,
 )
 if VIDEO_SAS_TTL_SECONDS > MAX_VIDEO_SAS_TTL_SECONDS:
-    raise ValueError("VIDEO_SAS_TTL_SECONDS ne doit pas dépasser 86400.")
+    raise ValueError(
+        f"VIDEO_SAS_TTL_SECONDS ne doit pas dépasser {MAX_VIDEO_SAS_TTL_SECONDS}."
+    )
 
 SasUriProvider = Callable[..., Awaitable[dict[str, str]]]
 
