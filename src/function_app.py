@@ -361,12 +361,16 @@ async def _to_content_blocks(
         for generation in result.result.generations
         if generation.status == "completed"
     ]
-    provider = sas_uri_provider or generate_video_sas_uris
+provider = sas_uri_provider or generate_video_sas_uris
+try:
     sas_uris = await provider(
         [generation.blob_path for generation in completed_generations],
         base_url=VIDEO_BLOB_BASE_URL,
         ttl_seconds=VIDEO_SAS_TTL_SECONDS,
     )
+except Exception:
+    logging.exception("Échec de génération des SAS vidéo; retour uniquement du statut.")
+    return blocks
 
     for generation in completed_generations:
         filename = generation.blob_path.rsplit("/", 1)[-1]
