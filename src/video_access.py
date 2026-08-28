@@ -82,10 +82,11 @@ async def generate_video_sas_uris(
     credential_factory: Callable[[], object] = _storage_credential,
     service_client_factory: Callable[..., object] = BlobServiceClient,
 ) -> dict[str, str]:
-if not 1 <= ttl_seconds <= MAX_VIDEO_SAS_TTL_SECONDS:
-    raise ValueError(
-        f"La durée du SAS vidéo doit être comprise entre 1 et {MAX_VIDEO_SAS_TTL_SECONDS} secondes."
-    )
+    if not 1 <= ttl_seconds <= MAX_VIDEO_SAS_TTL_SECONDS:
+        raise ValueError(
+            "La durée du SAS vidéo doit être comprise entre 1 et "
+            f"{MAX_VIDEO_SAS_TTL_SECONDS} secondes."
+        )
     if not blob_paths:
         return {}
 
