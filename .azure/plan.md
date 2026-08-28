@@ -78,7 +78,7 @@ Fields:
 | `ref_speaker1_filename` | `str` | Extensionless name; `.png` is appended for LTX `pic1` |
 | `ref_speaker2_filename` | `str` | Extensionless name; `.png` is appended for LTX `pic2` |
 | `prompts` | `List[str]` | 1–64 non-empty prompts; UTF-8 byte budgets protect DTS and Service Bus limits |
-| `orientation` | `Orientation` | `Vertical` = 720x1280; `Horizontal` = 1280x720 |
+| `orientation` | `Orientation` | `Vertical` = 704x1280; `Horizontal` = 1280x704 |
 
 MCP tools:
 
@@ -182,6 +182,7 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 - [x] Implement deterministic 2-hour durable timeout
 - [x] Return MCP SDK `TextContent` and `ResourceLink` blocks for polling and completed videos
 - [x] Use one DTS-enabled `host.json` for AZD and GitHub Actions deployments
+- [x] Complete timed-out event waits through a listener-free `continue_as_new` phase
 - [x] Add tests for validation, message mapping, orchestration results, failures, and timeouts
 - [x] Add local development configuration and README
 - [x] Run targeted tests, lint/type checks already provided by the project, and Functions metadata validation
@@ -216,6 +217,7 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 |-------|-------------|--------|-----------|
 | Rich MCP result tests | `.venv\Scripts\python.exe -m pytest tests\test_mcp_results.py tests\test_video_workflow.py -q` | 18 passed, including Azure Functions content-block serialization | 2026-08-26T21:20:00+02:00 |
 | DTS host deployment package | `.venv\Scripts\python.exe -m pytest -q`; `azd package api ...`; inspect packaged `host.json` | 36 passed; package uses `azureManaged`; `local.settings.json` absent | 2026-08-27T17:40:00+02:00 |
+| No-event orchestration timeout | `.venv\Scripts\python.exe -m pytest tests\test_orchestrator.py -q`; `.venv\Scripts\python.exe -m pytest -q` | 4 targeted and 37 total passed; timeout continues into a listener-free terminal execution | 2026-08-28T09:35:00+02:00 |
 | Python 3.13 tests | `.venv\Scripts\python.exe -m pytest -q` | 33 passed | 2026-08-26T21:20:00+02:00 |
 | Python compilation | `.venv\Scripts\python.exe -m compileall -q src tests` | Passed | 2026-08-26T21:20:00+02:00 |
 | Functions metadata | Import `function_app.app.get_functions()` under Python 3.13 | Four functions and expected MCP/Durable/Service Bus bindings discovered | 2026-08-26T21:20:00+02:00 |

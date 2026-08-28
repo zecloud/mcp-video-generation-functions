@@ -19,13 +19,16 @@ contains one `ResourceLink` per successful generation, with
 
 Every generation result contains its prompt/index, terminal status,
 deterministic blob path, optional `num_frames`, and any error or timeout.
-Vertical videos are 720x1280; horizontal videos are 1280x720.
+Vertical videos are 704x1280; horizontal videos are 1280x704.
 Each queue message also carries a deterministic seed derived from its
 `event_key`, so an at-least-once activity replay produces the same video at the
 same blob path instead of racing with a randomly different generation.
 The LTX `type_prefix` includes a short stable token derived from the Durable
 instance ID and prompt index. Retries of one workflow keep the same blob path,
 while concurrent workflows for the same `videoid` write distinct blobs.
+When the global timer wins, the orchestrator uses `continue_as_new` to enter a
+terminal phase without recreating pending external-event listeners, then
+completes with timeout results.
 
 Transport limits are enforced on UTF-8 bytes rather than character counts:
 

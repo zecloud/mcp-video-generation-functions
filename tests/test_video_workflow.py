@@ -42,7 +42,7 @@ def test_message_mapping_vertical_and_reference_extensions():
         "prompt": "Premier prompt",
         "pic1": "alice.png",
         "pic2": "bob.jpeg",
-        "width": 720,
+        "width": 704,
         "height": 1280,
         "type_prefix": type_prefix_for("instance-1", 0),
         "instance_id": "instance-1",
@@ -65,7 +65,7 @@ def test_message_mapping_horizontal():
         dts_event_name="event-name-2",
     )
 
-    assert (message.width, message.height) == (1280, 720)
+    assert (message.width, message.height) == (1280, 704)
     assert message.type_prefix == type_prefix_for("instance-1", 1)
 
 
