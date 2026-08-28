@@ -66,6 +66,8 @@ VIDEO_BLOB_BASE_URL = os.environ.get(
 @app.orchestration_trigger(context_name="context")
 def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
     orchestration_input = context.get_input()
+    if not isinstance(orchestration_input, dict):
+        raise ValueError("L’entrée d’orchestration doit être un objet JSON.")
     terminal_result = orchestration_input.get("terminal_result")
     if terminal_result is not None:
         return HDVideoWorkflowOutput.model_validate(terminal_result).model_dump(
