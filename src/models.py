@@ -68,8 +68,8 @@ class CreateHDVideoInput(BaseModel):
     orientation: Orientation = Field(
         default=Orientation.VERTICAL,
         description=(
-            "Orientation de la vidéo : Vertical produit 720x1280 et "
-            "Horizontal produit 1280x720."
+            "Orientation de la vidéo : Vertical produit 704x1280 et "
+            "Horizontal produit 1280x704."
         ),
     )
 

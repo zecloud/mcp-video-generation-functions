@@ -66,6 +66,12 @@ VIDEO_BLOB_BASE_URL = os.environ.get(
 @app.orchestration_trigger(context_name="context")
 def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
     orchestration_input = context.get_input()
+    terminal_result = orchestration_input.get("terminal_result")
+    if terminal_result is not None:
+        return HDVideoWorkflowOutput.model_validate(terminal_result).model_dump(
+            mode="json"
+        )
+
     request = CreateHDVideoInput.model_validate(orchestration_input["request"])
     timeout_seconds = int(orchestration_input["timeout_seconds"])
     instance_id = context.instance_id
@@ -102,7 +108,7 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
             [timeout_task, *[task for _, task in pending_dispatches]]
         )
         if winner == timeout_task:
-            return aggregate_generation_results(
+            result = aggregate_generation_results(
                 request=request,
                 descriptors=descriptors,
                 event_payloads=event_payloads,
@@ -111,7 +117,11 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
                     for descriptor in descriptors
                     if descriptor.index not in event_payloads
                 },
-            ).model_dump(mode="json")
+            )
+            context.continue_as_new(
+                {"terminal_result": result.model_dump(mode="json")}
+            )
+            return None
 
         for position, (index, dispatch_task) in enumerate(pending_dispatches):
             if winner == dispatch_task:
@@ -167,12 +177,18 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
         timeout_task.cancel()
 
     timed_out_indexes = {index for index, _, _ in pending_events}
-    return aggregate_generation_results(
+    result = aggregate_generation_results(
         request=request,
         descriptors=descriptors,
         event_payloads=event_payloads,
         timed_out_indexes=timed_out_indexes,
-    ).model_dump(mode="json")
+    )
+    if timed_out_indexes:
+        context.continue_as_new(
+            {"terminal_result": result.model_dump(mode="json")}
+        )
+        return None
+    return result.model_dump(mode="json")
 
 
 @app.activity_trigger(input_name="job")
