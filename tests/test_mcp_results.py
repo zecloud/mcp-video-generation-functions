@@ -2,6 +2,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 
+from azure.core.exceptions import AzureError
 from azure.functions import mcp as functions_mcp
 from function_app import (
     _to_content_blocks,
@@ -80,6 +81,10 @@ async def fake_sas_uri_provider(blob_paths, *, base_url, ttl_seconds):
         )
         for path in blob_paths
     }
+
+
+async def failing_sas_uri_provider(_blob_paths, *, base_url, ttl_seconds):
+    raise AzureError("Storage indisponible")
 
 
 def test_completed_polling_result_is_strongly_typed():
@@ -205,3 +210,22 @@ def test_running_result_returns_json_text_without_resource_link():
     assert len(blocks) == 1
     assert isinstance(blocks[0], TextContent)
     assert '"status":"running"' in blocks[0].text
+
+
+def test_completed_result_keeps_status_when_storage_sas_is_unavailable():
+    result = _workflow_response(
+        DurableStatus(
+            RuntimeStatus("Completed"),
+            "workflow-1",
+            workflow_output(),
+        ),
+        "workflow-1",
+    )
+
+    blocks = asyncio.run(
+        _to_content_blocks(result, sas_uri_provider=failing_sas_uri_provider)
+    )
+
+    assert len(blocks) == 1
+    assert isinstance(blocks[0], TextContent)
+    assert '"status":"completed"' in blocks[0].text
