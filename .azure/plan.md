@@ -84,7 +84,7 @@ MCP tools:
 
 1. `create_hd_video`: validates input, starts the durable orchestration, waits for a short configurable MCP budget, then returns either completed results or a `workflow_id`.
 2. `get_hd_video_result`: accepts a strongly typed required `workflow_id` and returns `running`, `completed`, `failed`, or `not_found`.
-3. Both tools return `List[ContentBlock]`: a JSON `TextContent` status and, for every successful terminal generation, a `ResourceLink` with `mimeType="video/mp4"` built from `VIDEO_BLOB_BASE_URL`.
+3. Both tools return `List[ContentBlock]`: a JSON `TextContent` status and, for every successful terminal generation, a `ResourceLink` with `mimeType="video/mp4"` and a short-lived read-only user delegation SAS generated through managed identity.
 
 ### Durable workflow
 
@@ -133,6 +133,7 @@ Changing these settings is an Azure modification and requires separate explicit 
 - Service Bus access uses `Azure Service Bus Data Sender` at queue or namespace scope.
 - DTS access uses `Durable Task Data Contributor`.
 - Storage access uses managed identity and data-plane RBAC.
+- Private video links use one-hour user delegation SAS tokens; no account key or stored SAS is used.
 - Secrets are excluded from source and local settings.
 - Input validation rejects empty identifiers, empty prompt lists, and blank prompts.
 
@@ -183,6 +184,7 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 - [x] Return MCP SDK `TextContent` and `ResourceLink` blocks for polling and completed videos
 - [x] Use one DTS-enabled `host.json` for AZD and GitHub Actions deployments
 - [x] Complete timed-out event waits through a listener-free `continue_as_new` phase
+- [x] Sign private video `ResourceLink` URLs with short-lived read-only user delegation SAS tokens
 - [x] Add tests for validation, message mapping, orchestration results, failures, and timeouts
 - [x] Add local development configuration and README
 - [x] Run targeted tests, lint/type checks already provided by the project, and Functions metadata validation
@@ -215,6 +217,12 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 
 | Check | Command Run | Result | Timestamp |
 |-------|-------------|--------|-----------|
+| Private video SAS tests | `.venv\Scripts\python.exe -m pytest tests\test_video_access.py tests\test_mcp_results.py -q` | 12 passed; HTTPS path encoding, one delegation key, read-only SAS links, TTL bounds, and MCP serialization covered | 2026-08-28T11:57:39+02:00 |
+| Full regression suite | `.venv\Scripts\python.exe -m pytest -q`; `.venv\Scripts\python.exe -m compileall -q src tests` | 41 passed; compilation passed | 2026-08-28T11:57:39+02:00 |
+| SAS infrastructure | `az bicep build`; `az bicep lint`; `az deployment sub validate ... assignExistingResourceRoles=false`; `azd provision --preview --no-prompt` | Passed; preview creates only the five new-environment resources and changes no existing Service Bus, DTS, or video Storage resource | 2026-08-28T11:57:39+02:00 |
+| SAS deployment package | `azd package api --output-path <session-artifact> --no-prompt`; inspect ZIP | Passed; `video_access.py` and dependencies included, `local.settings.json` excluded, DTS `host.json` retained | 2026-08-28T11:57:39+02:00 |
+| Functions metadata | Import `function_app.app.get_functions()` under Python 3.13 | Four functions and expected MCP/Durable/Service Bus bindings discovered after SAS integration | 2026-08-28T11:57:39+02:00 |
+| Azure context and policy | `azd auth login --check-status`; `az account show`; `az policy assignment list --disable-scope-strict-match` | Expected subscription authenticated; only the enforced Security Center default assignment found | 2026-08-28T11:57:39+02:00 |
 | Rich MCP result tests | `.venv\Scripts\python.exe -m pytest tests\test_mcp_results.py tests\test_video_workflow.py -q` | 18 passed, including Azure Functions content-block serialization | 2026-08-26T21:20:00+02:00 |
 | DTS host deployment package | `.venv\Scripts\python.exe -m pytest -q`; `azd package api ...`; inspect packaged `host.json` | 36 passed; package uses `azureManaged`; `local.settings.json` absent | 2026-08-27T17:40:00+02:00 |
 | No-event orchestration timeout | `.venv\Scripts\python.exe -m pytest tests\test_orchestrator.py -q`; `.venv\Scripts\python.exe -m pytest -q` | 4 targeted and 37 total passed; timeout continues into a listener-free terminal execution | 2026-08-28T09:35:00+02:00 |
@@ -230,7 +238,7 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 | Azure Policy review | `az policy assignment list --disable-scope-strict-match` | Only enforced Security Center default assignment; no deployment restriction found | 2026-08-26T21:20:00+02:00 |
 | Core Tools host | `func start --python --verbose` with Python 3.13 | Local worker in Core Tools 4.13.0 rejects Python 3.13; static metadata validation above passed | 2026-08-26T16:35:00+02:00 |
 
-**Validated by:** `azure-validate` on 2026-08-26
+**Validated by:** `azure-validate` on 2026-08-28
 
 ---
 

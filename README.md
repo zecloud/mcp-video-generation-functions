@@ -15,7 +15,7 @@ collects their Durable Task Scheduler events.
 Both tools return `List[ContentBlock]`. The first block is a `TextContent`
 containing the JSON status contract used for polling. A completed response also
 contains one `ResourceLink` per successful generation, with
-`mimeType="video/mp4"` and the generated video URL.
+`mimeType="video/mp4"` and a short-lived, read-only user delegation SAS URL.
 
 Every generation result contains its prompt/index, terminal status,
 deterministic blob path, optional `num_frames`, and any error or timeout.
@@ -70,7 +70,8 @@ SDK 2.x support requires a later Azure Functions release.
 | `MCP_WAIT_BUDGET_SECONDS` | `20`, inline MCP wait budget |
 | `MCP_POLL_INTERVAL_SECONDS` | `5`, suggested polling delay |
 | `ORCHESTRATION_TIMEOUT_SECONDS` | `7200`, durable global timeout |
-| `VIDEO_BLOB_BASE_URL` | Public base URL for generated LTX video links |
+| `VIDEO_BLOB_BASE_URL` | HTTPS Blob URL prefix for generated LTX videos |
+| `VIDEO_SAS_TTL_SECONDS` | `3600`, lifetime of read-only video SAS links; maximum 86400 |
 | `SERVICE_BUS_QUEUE_NAME` | `ltx25msrjob` |
 | `ServiceBusConnection__fullyQualifiedNamespace` | Existing namespace endpoint |
 | `ServiceBusConnection__credential` | `managedidentity` |
@@ -85,8 +86,10 @@ Application Insights, while referencing the existing Service Bus, DTS and Log
 Analytics resources.
 
 `ASSIGN_EXISTING_RESOURCE_ROLES` defaults to `false`. Enabling it would create
-sender/contributor role assignments on existing Service Bus and DTS resources
-and therefore requires separate explicit approval.
+sender/contributor role assignments on existing Service Bus, DTS, and output
+Blob Storage resources and therefore requires separate explicit approval. The
+Function identity needs `Storage Blob Data Contributor` on `fluxstorageaca` to
+request a user delegation key; it currently has no such assignment.
 
 ## Deployment gate
 
