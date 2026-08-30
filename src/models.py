@@ -197,7 +197,7 @@ class CreateHDVideoInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_transport_budgets(self) -> "CreateHDVideoInput":
-        request_size = len(self.model_dump_json().encode("utf-8"))
+        request_size = len(self.model_dump_json(exclude_none=True).encode("utf-8"))
         if request_size > DTS_INPUT_BUDGET_BYTES:
             raise ValueError(
                 f"L’entrée DTS occupe {request_size} octets UTF-8 ; "

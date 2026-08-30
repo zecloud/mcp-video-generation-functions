@@ -262,7 +262,7 @@ async def create_hd_video(
     instance_id = await client.start_new(
         "run_hd_video_orchestrator",
         client_input={
-            "request": request.model_dump(mode="json"),
+            "request": request.model_dump(mode="json", exclude_none=True),
             "timeout_seconds": ORCHESTRATION_TIMEOUT_SECONDS,
         },
     )
