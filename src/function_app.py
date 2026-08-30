@@ -112,7 +112,7 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
                 "enqueue_ltx25_generation",
                 {
                     "index": index,
-                    "message": message.model_dump(mode="json"),
+                    "message": message.model_dump(mode="json", exclude_none=True),
                 },
             )
         )
@@ -234,14 +234,30 @@ async def create_hd_video(
     ref_speaker2_filename: str,
     prompts: List[str],
     orientation: Orientation = Orientation.VERTICAL,
+    ref_speaker1_prompt: str | None = None,
+    ref_speaker2_prompt: str | None = None,
+    ref_speaker3_filename: str | None = None,
+    ref_speaker3_prompt: str | None = None,
+    ref_speaker4_filename: str | None = None,
+    ref_speaker4_prompt: str | None = None,
+    background_filename: str | None = None,
+    background_prompt: str | None = None,
 ) -> List[ContentBlock]:
     """Démarre les générations vidéo HD en parallèle et retourne le résultat ou un workflow_id."""
     request = CreateHDVideoInput(
         videoid=videoid,
         ref_speaker1_filename=ref_speaker1_filename,
         ref_speaker2_filename=ref_speaker2_filename,
+        ref_speaker3_filename=ref_speaker3_filename,
+        ref_speaker4_filename=ref_speaker4_filename,
+        background_filename=background_filename,
         prompts=prompts,
         orientation=orientation,
+        ref_speaker1_prompt=ref_speaker1_prompt,
+        ref_speaker2_prompt=ref_speaker2_prompt,
+        ref_speaker3_prompt=ref_speaker3_prompt,
+        ref_speaker4_prompt=ref_speaker4_prompt,
+        background_prompt=background_prompt,
     )
     instance_id = await client.start_new(
         "run_hd_video_orchestrator",

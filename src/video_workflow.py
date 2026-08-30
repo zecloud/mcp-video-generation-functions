@@ -6,12 +6,14 @@ from pathlib import PurePath
 from typing import Any, Mapping, Sequence
 
 from models import (
+    REFERENCE_FIELDS,
     CreateHDVideoInput,
     GenerationDescriptor,
     GenerationResult,
     HDVideoWorkflowOutput,
     Ltx25Message,
     Orientation,
+    ReferenceSpec,
     SERVICE_BUS_BODY_BUDGET_BYTES,
     SERVICE_BUS_MESSAGE_LIMIT_BYTES,
 )
@@ -44,7 +46,7 @@ def seed_for_event_key(event_key: str) -> int:
 
 
 def serialize_ltx25_message(message: Ltx25Message) -> str:
-    body = message.model_dump_json()
+    body = message.model_dump_json(exclude_none=True)
     body_size = len(body.encode("utf-8"))
     if body_size > SERVICE_BUS_BODY_BUDGET_BYTES:
         raise ValueError(
@@ -74,11 +76,35 @@ def build_generation(
         dts_event_name=dts_event_name,
         blob_path=output_blob_path(request.videoid, type_prefix),
     )
+    legacy_keys = ("pic1", "pic2", "pic3", "pic4", "background")
+    references: list[ReferenceSpec] | None = None
+    legacy_pics: dict[str, str] = {}
+    uses_references = any(
+        getattr(request, prompt_field) is not None
+        for _, prompt_field, _ in REFERENCE_FIELDS
+    )
+    if uses_references:
+        # Le validateur garantit la cohérence filename/prompt pour chaque référence.
+        references = [
+            ReferenceSpec(
+                file=ensure_png_when_extensionless(getattr(request, filename_field)),
+                prompt=getattr(request, prompt_field),
+                is_background=is_background,
+            )
+            for filename_field, prompt_field, is_background in REFERENCE_FIELDS
+            if getattr(request, filename_field) is not None
+        ]
+    else:
+        for legacy_key, (filename_field, _, _) in zip(legacy_keys, REFERENCE_FIELDS):
+            filename = getattr(request, filename_field)
+            if filename is not None:
+                legacy_pics[legacy_key] = ensure_png_when_extensionless(filename)
+
     message = Ltx25Message(
         videoid=request.videoid,
         prompt=prompt,
-        pic1=ensure_png_when_extensionless(request.ref_speaker1_filename),
-        pic2=ensure_png_when_extensionless(request.ref_speaker2_filename),
+        **legacy_pics,
+        references=references,
         width=width,
         height=height,
         type_prefix=type_prefix,
