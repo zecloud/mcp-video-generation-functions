@@ -34,25 +34,25 @@ class FakeBlobServiceClient:
 
 def test_video_blob_location_encodes_multibyte_path():
     location = video_blob_location(
-        "ltxavatarjob/agentvideo/vidéo 42/fichier final.mp4",
-        "https://fluxstorageaca.blob.core.windows.net/"
-        "ltxavatarjob/agentvideo",
+        "video/vidéo 42/fichier final.mp4",
+        "https://storage.example.invalid/"
+        "video",
     )
 
-    assert location.account_name == "fluxstorageaca"
-    assert location.container_name == "ltxavatarjob"
-    assert location.blob_name == "agentvideo/vidéo 42/fichier final.mp4"
+    assert location.account_name == "storage"
+    assert location.container_name == "video"
+    assert     location.blob_name == "vidéo 42/fichier final.mp4"
     assert location.unsigned_url.endswith(
-        "agentvideo/vid%C3%A9o%2042/fichier%20final.mp4"
+        "vid%C3%A9o%2042/fichier%20final.mp4"
     )
 
 
 def test_video_blob_location_rejects_non_https_base_url():
     with pytest.raises(ValueError, match="HTTPS"):
         video_blob_location(
-            "ltxavatarjob/agentvideo/video/file.mp4",
-            "http://fluxstorageaca.blob.core.windows.net/"
-            "ltxavatarjob/agentvideo",
+            "video/video/file.mp4",
+            "http://storage.example.invalid/"
+            "video",
         )
 
 
@@ -63,8 +63,8 @@ def test_generate_video_sas_uris_rejects_invalid_ttl(ttl_seconds):
             generate_video_sas_uris(
                 [],
                 base_url=(
-                    "https://fluxstorageaca.blob.core.windows.net/"
-                    "ltxavatarjob/agentvideo"
+                    "https://storage.example.invalid/"
+                    "video"
                 ),
                 ttl_seconds=ttl_seconds,
             )
@@ -88,16 +88,16 @@ def test_generate_video_sas_uris_uses_one_delegation_key(monkeypatch):
     monkeypatch.setattr(video_access, "generate_blob_sas", fake_generate_blob_sas)
     issued_at = datetime(2026, 8, 28, 9, 0, tzinfo=timezone.utc)
     blob_paths = [
-        "ltxavatarjob/agentvideo/video-42/first.mp4",
-        "ltxavatarjob/agentvideo/video-42/second.mp4",
+        "video/video-42/first.mp4",
+        "video/video-42/second.mp4",
     ]
 
     uris = asyncio.run(
         generate_video_sas_uris(
             blob_paths,
             base_url=(
-                "https://fluxstorageaca.blob.core.windows.net/"
-                "ltxavatarjob/agentvideo"
+                "https://storage.example.invalid/"
+                "video"
             ),
             ttl_seconds=3600,
             now=issued_at,
@@ -108,7 +108,7 @@ def test_generate_video_sas_uris_uses_one_delegation_key(monkeypatch):
 
     assert len(clients) == 1
     assert clients[0].account_url == (
-        "https://fluxstorageaca.blob.core.windows.net"
+        "https://storage.example.invalid"
     )
     assert clients[0].key_request == (
         datetime(2026, 8, 28, 8, 55, tzinfo=timezone.utc),
@@ -118,8 +118,8 @@ def test_generate_video_sas_uris_uses_one_delegation_key(monkeypatch):
     assert uris[blob_paths[0]].endswith("?sp=r&sig=signature-1")
     assert uris[blob_paths[1]].endswith("?sp=r&sig=signature-2")
     assert [call["blob_name"] for call in sas_calls] == [
-        "agentvideo/video-42/first.mp4",
-        "agentvideo/video-42/second.mp4",
+        "video-42/first.mp4",
+        "video-42/second.mp4",
     ]
     assert all(str(call["permission"]) == "r" for call in sas_calls)
     assert all(call["protocol"] == "https" for call in sas_calls)

@@ -25,7 +25,7 @@ def test_no_alternate_deployment_host_configuration_exists():
 
 def test_github_package_excludes_local_settings():
     workflow = (
-        ROOT / ".github" / "workflows" / "master_mcpltx25workflow.yml"
+        ROOT / ".github" / "workflows" / "master_mcpvideoworkflow.yml"
     ).read_text(encoding="utf-8")
 
     assert "--exclude='local.settings.json'" in workflow

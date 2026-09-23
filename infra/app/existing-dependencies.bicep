@@ -90,7 +90,7 @@ output appSettings object = {
   ServiceBusConnection__fullyQualifiedNamespace: '${serviceBusNamespace.name}.servicebus.windows.net'
   ServiceBusConnection__credential: 'managedidentity'
   ServiceBusConnection__clientId: managedIdentityClientId
-  SERVICE_BUS_QUEUE_NAME: serviceBusQueue.name
+  VIDEO_SERVICE_BUS_QUEUE_NAME: serviceBusQueue.name
   DURABLE_TASK_SCHEDULER_CONNECTION_STRING: 'Endpoint=${dtsEndpoint};TaskHub=${dtsTaskHub.name};Authentication=ManagedIdentity;ClientID=${managedIdentityClientId}'
   TASKHUB_NAME: dtsTaskHub.name
 }

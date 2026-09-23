@@ -24,7 +24,7 @@ from models import (
     FailedWorkflowResult,
     GetHDVideoResultInput,
     HDVideoWorkflowOutput,
-    Ltx25Message,
+    VideoMessage,
     NotFoundWorkflowResult,
     Orientation,
     RunningWorkflowResult,
@@ -38,7 +38,7 @@ from video_workflow import (
     aggregate_generation_results,
     build_generation,
     is_retryable_failure_event,
-    serialize_ltx25_message,
+    serialize_video_message,
 )
 
 
@@ -63,7 +63,7 @@ ORCHESTRATION_TIMEOUT_SECONDS = _positive_int_setting(
 )
 VIDEO_BLOB_BASE_URL = os.environ.get(
     "VIDEO_BLOB_BASE_URL",
-    "https://fluxstorageaca.blob.core.windows.net/ltxavatarjob/agentvideo",
+    "https://storage.example.invalid/video",
 ).rstrip("/")
 VIDEO_SAS_TTL_SECONDS = _positive_int_setting(
     "VIDEO_SAS_TTL_SECONDS",
@@ -98,7 +98,7 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
     dispatch_tasks = []
     for index in range(len(request.prompts)):
         event_key = f"{instance_id}:{index}:{context.new_uuid()}"
-        dts_event_name = f"ltx25-hd-{index}-{context.new_uuid()}"
+        dts_event_name = f"video-hd-{index}-{context.new_uuid()}"
         descriptor, message = build_generation(
             request,
             index=index,
@@ -109,7 +109,7 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
         descriptors.append(descriptor)
         dispatch_tasks.append(
             context.call_activity(
-                "enqueue_ltx25_generation",
+                "enqueue_video_generation",
                 {
                     "index": index,
                     "message": message.model_dump(mode="json", exclude_none=True),
@@ -210,12 +210,12 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
 @app.activity_trigger(input_name="job")
 @app.service_bus_queue_output(
     arg_name="message",
-    queue_name="%SERVICE_BUS_QUEUE_NAME%",
+    queue_name="%VIDEO_SERVICE_BUS_QUEUE_NAME%",
     connection="ServiceBusConnection",
 )
-def enqueue_ltx25_generation(job: dict, message: func.Out[str]) -> dict:
-    body = Ltx25Message.model_validate(job["message"])
-    message.set(serialize_ltx25_message(body))
+def enqueue_video_generation(job: dict, message: func.Out[str]) -> dict:
+    body = VideoMessage.model_validate(job["message"])
+    message.set(serialize_video_message(body))
     return {
         "index": job["index"],
         "event_key": body.event_key,

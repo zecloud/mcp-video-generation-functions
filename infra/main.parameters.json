@@ -10,7 +10,45 @@
     },
     "assignExistingResourceRoles": {
       "value": false
+    },
+    "serviceBusResourceGroupName": {
+      "value": "${VIDEO_SERVICE_BUS_RESOURCE_GROUP_NAME}"
+    },
+    "serviceBusNamespaceName": {
+      "value": "${VIDEO_SERVICE_BUS_NAMESPACE_NAME}"
+    },
+    "serviceBusQueueName": {
+      "value": "${VIDEO_SERVICE_BUS_QUEUE_NAME}"
+    },
+    "dtsResourceGroupName": {
+      "value": "${VIDEO_DTS_RESOURCE_GROUP_NAME}"
+    },
+    "dtsSchedulerName": {
+      "value": "${VIDEO_DTS_SCHEDULER_NAME}"
+    },
+    "dtsTaskHubName": {
+      "value": "${VIDEO_DTS_TASKHUB_NAME}"
+    },
+    "dtsEndpoint": {
+      "value": "${VIDEO_DTS_ENDPOINT}"
+    },
+    "logAnalyticsResourceGroupName": {
+      "value": "${VIDEO_LOG_ANALYTICS_RESOURCE_GROUP_NAME}"
+    },
+    "logAnalyticsWorkspaceName": {
+      "value": "${VIDEO_LOG_ANALYTICS_WORKSPACE_NAME}"
+    },
+    "videoStorageResourceGroupName": {
+      "value": "${VIDEO_STORAGE_RESOURCE_GROUP_NAME}"
+    },
+    "videoStorageAccountName": {
+      "value": "${VIDEO_STORAGE_ACCOUNT_NAME}"
+    },
+    "videoBlobBaseUrl": {
+      "value": "${VIDEO_BLOB_BASE_URL}"
+    },
+    "videoBlobPathPrefix": {
+      "value": "${VIDEO_BLOB_PATH_PREFIX}"
     }
   }
 }
-

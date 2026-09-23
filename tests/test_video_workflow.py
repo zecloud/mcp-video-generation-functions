@@ -5,7 +5,7 @@ from pydantic import ValidationError
 
 from models import (
     CreateHDVideoInput,
-    Ltx25Message,
+    VideoMessage,
     MAX_PROMPT_UTF8_BYTES,
     Orientation,
     ReferenceSpec,
@@ -17,7 +17,7 @@ from video_workflow import (
     ensure_png_when_extensionless,
     is_retryable_failure_event,
     seed_for_event_key,
-    serialize_ltx25_message,
+    serialize_video_message,
     type_prefix_for,
 )
 
@@ -57,7 +57,7 @@ def test_message_mapping_vertical_and_reference_extensions():
     # Le schéma legacy ne doit pas émettre references.
     assert message.references is None
     assert descriptor.blob_path == (
-        "ltxavatarjob/agentvideo/video-42/"
+        "video/video-42/"
         f"{type_prefix_for('instance-1', 0)}-video-42.mp4"
     )
 
@@ -93,7 +93,7 @@ def test_message_mapping_with_reference_prompts_emits_references_schema():
     assert message.prompt == "Narration complète"
     assert descriptor.prompt == "Narration complète"
 
-    payload = json.loads(serialize_ltx25_message(message))
+    payload = json.loads(serialize_video_message(message))
     assert "pic1" not in payload
     assert "pic2" not in payload
     assert payload["references"] == [
@@ -130,7 +130,7 @@ def test_legacy_message_includes_pic3_pic4_and_background_when_provided():
     )
 
     assert message.references is None
-    payload = json.loads(serialize_ltx25_message(message))
+    payload = json.loads(serialize_video_message(message))
     assert payload["pic1"] == "alice.png"
     assert payload["pic2"] == "bob.png"
     assert payload["pic3"] == "carol.png"
@@ -174,7 +174,7 @@ def test_message_mapping_with_five_references_is_stable_and_background_flagged()
             is_background=True,
         ),
     ]
-    payload = json.loads(serialize_ltx25_message(message))
+    payload = json.loads(serialize_video_message(message))
     for legacy_key in ("pic1", "pic2", "pic3", "pic4", "background"):
         assert legacy_key not in payload
     assert [entry["is_background"] for entry in payload["references"]] == [
@@ -341,14 +341,14 @@ def test_multibyte_message_close_to_limit_is_accepted():
         event_key="event-key-1",
         dts_event_name="event-name-1",
     )
-    serialized = serialize_ltx25_message(message)
+    serialized = serialize_video_message(message)
 
     assert len(serialized.encode("utf-8")) <= SERVICE_BUS_BODY_BUDGET_BYTES
     assert len(serialized.encode("utf-8")) > len(serialized)
 
 
 def test_final_serialized_message_over_service_bus_budget_is_rejected():
-    message = Ltx25Message(
+    message = VideoMessage(
         videoid="video-42",
         prompt="😀" * (SERVICE_BUS_BODY_BUDGET_BYTES // 4),
         pic1="alice.png",
@@ -363,11 +363,11 @@ def test_final_serialized_message_over_service_bus_budget_is_rejected():
     )
 
     with pytest.raises(ValueError, match="limite Service Bus Basic"):
-        serialize_ltx25_message(message)
+        serialize_video_message(message)
 
 
 def test_final_serialized_references_message_over_service_bus_budget_is_rejected():
-    message = Ltx25Message(
+    message = VideoMessage(
         videoid="video-42",
         prompt="😀" * (SERVICE_BUS_BODY_BUDGET_BYTES // 4),
         references=[
@@ -384,7 +384,7 @@ def test_final_serialized_references_message_over_service_bus_budget_is_rejected
     )
 
     with pytest.raises(ValueError, match="limite Service Bus Basic"):
-        serialize_ltx25_message(message)
+        serialize_video_message(message)
 
 
 def test_legacy_serialization_is_byte_identical_without_new_fields():
@@ -405,7 +405,7 @@ def test_legacy_serialization_is_byte_identical_without_new_fields():
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    message = Ltx25Message(
+    message = VideoMessage(
         videoid="video-42",
         prompt="Premier prompt",
         pic1="alice.png",
@@ -419,12 +419,12 @@ def test_legacy_serialization_is_byte_identical_without_new_fields():
         seed=42,
     )
 
-    assert serialize_ltx25_message(message) == legacy_body
+    assert serialize_video_message(message) == legacy_body
 
 
-def test_ltx25_message_rejects_references_with_empty_prompt():
+def test_video_message_rejects_references_with_empty_prompt():
     with pytest.raises(ValidationError):
-        Ltx25Message(
+        VideoMessage(
             videoid="video-42",
             prompt="Narration",
             references=[{"file": "alice.png", "prompt": ""}],
