@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import PurePath
 from typing import Any, Mapping, Sequence
 
@@ -11,14 +12,14 @@ from models import (
     GenerationDescriptor,
     GenerationResult,
     HDVideoWorkflowOutput,
-    Ltx25Message,
+    VideoMessage,
     Orientation,
     ReferenceSpec,
     SERVICE_BUS_BODY_BUDGET_BYTES,
     SERVICE_BUS_MESSAGE_LIMIT_BYTES,
 )
 
-VIDEO_BLOB_PATH_PREFIX = "ltxavatarjob/agentvideo/"
+VIDEO_BLOB_PATH_PREFIX = os.environ.get("VIDEO_BLOB_PATH_PREFIX", "video/").strip("/") + "/"
 
 
 ORIENTATION_DIMENSIONS: dict[Orientation, tuple[int, int]] = {
@@ -45,12 +46,12 @@ def seed_for_event_key(event_key: str) -> int:
     return int.from_bytes(digest[:4], "big") & 0x7FFF_FFFF
 
 
-def serialize_ltx25_message(message: Ltx25Message) -> str:
+def serialize_video_message(message: VideoMessage) -> str:
     body = message.model_dump_json(exclude_none=True)
     body_size = len(body.encode("utf-8"))
     if body_size > SERVICE_BUS_BODY_BUDGET_BYTES:
         raise ValueError(
-            f"Le message LTX 2.5 occupe {body_size} octets UTF-8 ; "
+            f"Le message vidéo occupe {body_size} octets UTF-8 ; "
             f"le budget est {SERVICE_BUS_BODY_BUDGET_BYTES} octets "
             f"(limite Service Bus Basic : {SERVICE_BUS_MESSAGE_LIMIT_BYTES} octets)."
         )
@@ -64,7 +65,7 @@ def build_generation(
     instance_id: str,
     event_key: str,
     dts_event_name: str,
-) -> tuple[GenerationDescriptor, Ltx25Message]:
+) -> tuple[GenerationDescriptor, VideoMessage]:
     prompt = request.prompts[index]
     width, height = ORIENTATION_DIMENSIONS[request.orientation]
     type_prefix = type_prefix_for(instance_id, index)
@@ -100,7 +101,7 @@ def build_generation(
             if filename is not None:
                 legacy_pics[legacy_key] = ensure_png_when_extensionless(filename)
 
-    message = Ltx25Message(
+    message = VideoMessage(
         videoid=request.videoid,
         prompt=prompt,
         **legacy_pics,
@@ -113,7 +114,7 @@ def build_generation(
         dts_event_name=dts_event_name,
         seed=seed_for_event_key(event_key),
     )
-    serialize_ltx25_message(message)
+    serialize_video_message(message)
     return descriptor, message
 
 
@@ -124,7 +125,7 @@ def decode_event_payload(payload: Any) -> Mapping[str, Any]:
         decoded = json.loads(payload)
         if isinstance(decoded, Mapping):
             return decoded
-    raise ValueError("Le résultat LTX 2.5 doit être un objet JSON.")
+    raise ValueError("Le résultat vidéo doit être un objet JSON.")
 
 
 def is_retryable_failure_event(payload: Any, expected_event_key: str) -> bool:
@@ -179,7 +180,7 @@ def aggregate_generation_results(
                     )
                 )
             else:
-                error = str(payload.get("error") or "La génération LTX 2.5 a échoué.")
+                error = str(payload.get("error") or "La génération vidéo a échoué.")
                 results.append(
                     GenerationResult(
                         index=descriptor.index,
@@ -196,7 +197,7 @@ def aggregate_generation_results(
                     prompt=descriptor.prompt,
                     status="failed",
                     blob_path=descriptor.blob_path,
-                    error=f"Résultat LTX 2.5 invalide : {exc}",
+                    error=f"Résultat vidéo invalide : {exc}",
                 )
             )
 

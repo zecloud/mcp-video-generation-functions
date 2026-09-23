@@ -42,7 +42,7 @@ def workflow_output():
                 "prompt": "Prompt",
                 "status": "completed",
                 "blob_path": (
-                    "ltxavatarjob/agentvideo/video-42/"
+                    "video/video-42/"
                     "hdvideo-001-video-42.mp4"
                 ),
                 "num_frames": 121,
@@ -59,7 +59,7 @@ def mixed_workflow_output():
             "prompt": "Prompt en échec",
             "status": "failed",
             "blob_path": (
-                "ltxavatarjob/agentvideo/video-42/"
+                "video/video-42/"
                 "hdvideo-failed-video-42.mp4"
             ),
             "error": "GPU unavailable",
@@ -70,13 +70,12 @@ def mixed_workflow_output():
 
 async def fake_sas_uri_provider(blob_paths, *, base_url, ttl_seconds):
     assert base_url == (
-        "https://fluxstorageaca.blob.core.windows.net/"
-        "ltxavatarjob/agentvideo"
+        "https://storage.example.invalid/video"
     )
     assert ttl_seconds == 3600
     return {
         path: (
-            f"{base_url}/{path.removeprefix('ltxavatarjob/agentvideo/')}"
+            f"{base_url}/{path.removeprefix('video/')}"
             "?sp=r&sig=test-signature"
         )
         for path in blob_paths
@@ -160,8 +159,8 @@ def test_completed_result_returns_text_and_video_resource_links():
     assert isinstance(blocks[1], ResourceLink)
     assert blocks[1].mimeType == "video/mp4"
     assert str(blocks[1].uri) == (
-        "https://fluxstorageaca.blob.core.windows.net/"
-        "ltxavatarjob/agentvideo/video-42/hdvideo-001-video-42.mp4"
+        "https://storage.example.invalid/"
+        "video/video-42/hdvideo-001-video-42.mp4"
         "?sp=r&sig=test-signature"
     )
     assert blocks[1].name == "hdvideo-001-video-42.mp4"
@@ -187,8 +186,8 @@ def test_azure_functions_serializes_rich_content_block_list():
     assert payload[1] == {
         "name": "hdvideo-001-video-42.mp4",
         "uri": (
-            "https://fluxstorageaca.blob.core.windows.net/"
-            "ltxavatarjob/agentvideo/video-42/hdvideo-001-video-42.mp4"
+            "https://storage.example.invalid/"
+            "video/video-42/hdvideo-001-video-42.mp4"
             "?sp=r&sig=test-signature"
         ),
         "description": "Vidéo HD générée pour le prompt 1, 121 images.",

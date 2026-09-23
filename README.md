@@ -1,7 +1,7 @@
 # MCP HD video generation
 
-Azure Functions Python 3.13 MCP server that starts one LTX 2.5 generation per
-prompt, sends all jobs to the existing `ltx25msrjob` Service Bus queue, and
+Azure Functions Python 3.13 MCP server that starts one video generation per
+prompt, sends all jobs to the configured Service Bus queue, and
 collects their Durable Task Scheduler events.
 
 ## MCP tools
@@ -23,7 +23,7 @@ Vertical videos are 704x1280; horizontal videos are 1280x704.
 Each queue message also carries a deterministic seed derived from its
 `event_key`, so an at-least-once activity replay produces the same video at the
 same blob path instead of racing with a randomly different generation.
-The LTX `type_prefix` includes a short stable token derived from the Durable
+The video `type_prefix` includes a short stable token derived from the Durable
 instance ID and prompt index. Retries of one workflow keep the same blob path,
 while concurrent workflows for the same `videoid` write distinct blobs.
 When the global timer wins, the orchestrator uses `continue_as_new` to enter a
@@ -59,6 +59,15 @@ has sender access to the existing queue; unit tests do not access Azure.
 `local.settings.json` is excluded from both AZD and GitHub Actions deployment
 packages.
 
+Production resource identifiers are injected through AZD environment variables:
+`VIDEO_SERVICE_BUS_RESOURCE_GROUP_NAME`, `VIDEO_SERVICE_BUS_NAMESPACE_NAME`,
+`VIDEO_SERVICE_BUS_QUEUE_NAME`, `VIDEO_DTS_RESOURCE_GROUP_NAME`,
+`VIDEO_DTS_SCHEDULER_NAME`, `VIDEO_DTS_TASKHUB_NAME`, `VIDEO_DTS_ENDPOINT`,
+`VIDEO_LOG_ANALYTICS_RESOURCE_GROUP_NAME`,
+`VIDEO_LOG_ANALYTICS_WORKSPACE_NAME`, `VIDEO_STORAGE_RESOURCE_GROUP_NAME`,
+`VIDEO_STORAGE_ACCOUNT_NAME`, `VIDEO_BLOB_BASE_URL`, and
+`VIDEO_BLOB_PATH_PREFIX`.
+
 The runtime pins the maintained MCP SDK 1.x line because stable
 `azure-functions` 2.2 serializes its `mcp.types` content blocks natively. MCP
 SDK 2.x support requires a later Azure Functions release.
@@ -70,9 +79,11 @@ SDK 2.x support requires a later Azure Functions release.
 | `MCP_WAIT_BUDGET_SECONDS` | `20`, inline MCP wait budget |
 | `MCP_POLL_INTERVAL_SECONDS` | `5`, suggested polling delay |
 | `ORCHESTRATION_TIMEOUT_SECONDS` | `7200`, durable global timeout |
-| `VIDEO_BLOB_BASE_URL` | HTTPS Blob URL prefix for generated LTX videos |
+| `VIDEO_BLOB_BASE_URL` | HTTPS Blob URL prefix for generated videos |
 | `VIDEO_SAS_TTL_SECONDS` | `3600`, lifetime of read-only video SAS links; maximum 86400 |
-| `SERVICE_BUS_QUEUE_NAME` | `ltx25msrjob` |
+| `VIDEO_SERVICE_BUS_QUEUE_NAME` | Service Bus queue name, injected per environment |
+| `VIDEO_BLOB_PATH_PREFIX` | Blob container and path prefix, injected per environment |
+| `VIDEO_FUNCTION_APP_NAME` | GitHub Actions variable containing the Function App name |
 | `ServiceBusConnection__fullyQualifiedNamespace` | Existing namespace endpoint |
 | `ServiceBusConnection__credential` | `managedidentity` |
 | `ServiceBusConnection__clientId` | Function UAMI client ID in Azure |
@@ -88,7 +99,8 @@ Analytics resources.
 `ASSIGN_EXISTING_RESOURCE_ROLES` defaults to `false`. Enabling it would create
 sender/contributor role assignments on existing Service Bus, DTS, and output
 Blob Storage resources and therefore requires separate explicit approval. The
-Function identity needs `Storage Blob Data Contributor` on `fluxstorageaca` to
+Function identity needs `Storage Blob Data Contributor` on the configured video
+storage account to
 request a user delegation key; it currently has no such assignment.
 
 ## Deployment gate

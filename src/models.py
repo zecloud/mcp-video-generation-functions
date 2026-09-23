@@ -292,7 +292,7 @@ class GetHDVideoResultInput(BaseModel):
     )
 
 
-class Ltx25Message(BaseModel):
+class VideoMessage(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     videoid: NonEmptyString

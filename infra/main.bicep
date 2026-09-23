@@ -57,18 +57,19 @@ param storageAccountName string = ''
 @description('Existing-resource role assignments are disabled until separately approved.')
 param assignExistingResourceRoles bool = false
 
-param serviceBusResourceGroupName string = 'agentsdcpp'
-param serviceBusNamespaceName string = 'agentvideo-namespace'
-param serviceBusQueueName string = 'ltx25msrjob'
-param dtsResourceGroupName string = 'agentsdcpp'
-param dtsSchedulerName string = 'agentvideo'
-param dtsTaskHubName string = 'default'
-param dtsEndpoint string = 'https://agentvideo-atgnfafbfvdrg.westus3.durabletask.io'
-param logAnalyticsResourceGroupName string = 'agentsdcpp'
-param logAnalyticsWorkspaceName string = 'workspaceagentsdcpp8688'
-param videoStorageResourceGroupName string = 'agentsdcpp'
-param videoStorageAccountName string = 'fluxstorageaca'
-param videoBlobBaseUrl string = 'https://${videoStorageAccountName}.blob.${environment().suffixes.storage}/ltxavatarjob/agentvideo'
+param serviceBusResourceGroupName string
+param serviceBusNamespaceName string
+param serviceBusQueueName string
+param dtsResourceGroupName string
+param dtsSchedulerName string
+param dtsTaskHubName string
+param dtsEndpoint string
+param logAnalyticsResourceGroupName string
+param logAnalyticsWorkspaceName string
+param videoStorageResourceGroupName string
+param videoStorageAccountName string
+param videoBlobBaseUrl string = 'https://${videoStorageAccountName}.blob.${environment().suffixes.storage}/video'
+param videoBlobPathPrefix string = 'video'
 
 @minValue(1)
 param mcpWaitBudgetSeconds int = 20
@@ -221,6 +222,7 @@ module api './app/api.bicep' = {
       MCP_POLL_INTERVAL_SECONDS: '${mcpPollIntervalSeconds}'
       ORCHESTRATION_TIMEOUT_SECONDS: '${orchestrationTimeoutSeconds}'
       VIDEO_BLOB_BASE_URL: videoBlobBaseUrl
+      VIDEO_BLOB_PATH_PREFIX: videoBlobPathPrefix
       VIDEO_SAS_TTL_SECONDS: '${videoSasTtlSeconds}'
     })
   }

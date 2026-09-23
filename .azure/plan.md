@@ -10,7 +10,7 @@ Generated: 2026-08-26T15:51:00+02:00
 
 ## 1. Project Overview
 
-**Goal:** Build a Python Azure Functions MCP server that starts parallel LTX 2.5 HD video generations through Service Bus, waits for their Durable Task Scheduler events, and returns terminal generation results.
+**Goal:** Build a Python Azure Functions MCP server that starts parallel HD video generations through Service Bus, waits for their Durable Task Scheduler events, and returns terminal generation results.
 
 **Path:** New Project
 
@@ -41,8 +41,8 @@ Generated: 2026-08-26T15:51:00+02:00
 | MCP tools | API | Azure Functions MCP trigger + Pydantic v2 | `src/function_app.py` |
 | Video orchestrator | Workflow | Durable Functions fan-out/fan-in + external events | `src/function_app.py` |
 | Queue activity | Worker | Durable activity + Service Bus output binding | `src/function_app.py` |
-| LTX 2.5 integration | Existing worker | `agentvideo-namespace/ltx25msrjob` | Existing `func_tts_eurovibe/ltx25` app |
-| Durable backend | Existing service | DTS scheduler `agentvideo`, task hub `default` | Resource group `agentsdcpp` |
+| Video generation integration | Existing worker | Configured Service Bus queue | Existing video generation worker |
+| Durable backend | Existing service | DTS scheduler and task hub supplied by deployment variables | Existing resource group supplied by deployment variables |
 | Tests | Validation | pytest | `tests/` |
 
 ---
@@ -75,8 +75,8 @@ Fields:
 | Field | Type | Behavior |
 |-------|------|----------|
 | `videoid` | `str` | Existing video job folder identifier |
-| `ref_speaker1_filename` | `str` | Extensionless name; `.png` is appended for LTX `pic1` |
-| `ref_speaker2_filename` | `str` | Extensionless name; `.png` is appended for LTX `pic2` |
+| `ref_speaker1_filename` | `str` | Extensionless name; `.png` is appended for the first reference |
+| `ref_speaker2_filename` | `str` | Extensionless name; `.png` is appended for the second reference |
 | `prompts` | `List[str]` | 1–64 non-empty prompts; UTF-8 byte budgets protect DTS and Service Bus limits |
 | `orientation` | `Orientation` | `Vertical` = 704x1280; `Horizontal` = 1280x704 |
 
@@ -89,28 +89,28 @@ MCP tools:
 ### Durable workflow
 
 1. Start one orchestration for the complete request.
-2. Fan out one `enqueue_ltx25_generation` activity per prompt.
-3. Each activity sends one JSON message to the existing `ltx25msrjob` queue:
+2. Fan out one `enqueue_video_generation` activity per prompt.
+3. Each activity sends one JSON message to the configured queue:
    - `videoid`, `prompt`, `pic1`, `pic2`, `width`, `height`
    - deterministic per-orchestration `type_prefix` derived from `instance_id`
    - orchestration `instance_id`
    - unique `event_key`
    - unique `dts_event_name`
-4. The orchestrator waits in parallel for all matching DTS external events raised by LTX 2.5.
+4. The orchestrator waits in parallel for all matching DTS external events raised by the video worker.
 5. A durable timer enforces the configurable 2-hour timeout.
 6. The result contains every terminal generation, including prompt/index, status, output blob path, frame count when available, and error details when failed or timed out.
 
 No HTTP callback is created or used.
 
-### Existing LTX 2.5 event contract
+### Existing video worker event contract
 
-The merged LTX 2.5 code already accepts `instance_id`, `event_key`, and `dts_event_name`, then calls `DurableTaskSchedulerClient.raise_orchestration_event`. No LTX source change is planned.
+The existing video worker already accepts `instance_id`, `event_key`, and `dts_event_name`, then calls `DurableTaskSchedulerClient.raise_orchestration_event`.
 
-Before any future Azure deployment, the existing LTX Function App must be confirmed to have:
+Before any future Azure deployment, the existing video Function App must be confirmed to have:
 
 - `DTS_EVENT_ENABLED=true`
-- `DTS_ENDPOINT=https://agentvideo-atgnfafbfvdrg.westus3.durabletask.io`
-- `DTS_TASKHUB=default`
+- `DTS_ENDPOINT` set from the production environment
+- `DTS_TASKHUB` set to the value of `VIDEO_DTS_TASKHUB_NAME`
 - managed identity permission to raise events in the target DTS scheduler
 
 Changing these settings is an Azure modification and requires separate explicit approval.
@@ -121,10 +121,10 @@ Changing these settings is an Azure modification and requires separate explicit 
 |-----------|---------------|-------------------------|
 | MCP + orchestrator + activities | Azure Functions | Flex Consumption FC1 |
 | Host/MCP state and deployment package | Storage Account | Standard LRS |
-| Durable state | Durable Task Scheduler | Existing Consumption scheduler `agentvideo/default` |
-| Generation commands | Azure Service Bus | Existing Basic namespace `agentvideo-namespace`, queue `ltx25msrjob` |
+| Durable state | Durable Task Scheduler | Existing Consumption scheduler and task hub supplied by deployment variables |
+| Generation commands | Azure Service Bus | Existing Basic namespace and queue, supplied through deployment parameters |
 | Telemetry | Application Insights | Workspace-based |
-| Logs | Log Analytics | Existing `workspaceagentsdcpp8688` |
+| Logs | Log Analytics | Existing workspace supplied by deployment variables |
 | Service authentication | User-assigned managed identity | RBAC-only |
 
 ### Security
@@ -148,11 +148,11 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 | `Microsoft.Web/sites` | 1 | 7 in `westus3` | 5,000 Function Apps per subscription | Existing count: 6. Microsoft.Web quota API reports quota as not applicable; official Functions limit used. |
 | `Microsoft.Web/serverfarms` (FC1) | 1 | 7 in `westus3` | 250 regional cores / 512,000 MB | Existing plan count: 6. New app will cap at 10 x 2,048 MB instances = 10 cores maximum. |
 | `Microsoft.Storage/storageAccounts` | 1 | 11 in `westus3` | 250 | Azure quota CLI: current 10, limit 250. |
-| `Microsoft.DurableTask/schedulers` | 0 | 1 in `westus3` | 10 Consumption schedulers | Reuse existing `agentvideo`; quota API unsupported, official DTS limit used. |
+| `Microsoft.DurableTask/schedulers` | 0 | 1 in `westus3` | 10 Consumption schedulers | Reuse the existing scheduler supplied by deployment variables. |
 | `Microsoft.DurableTask/schedulers/taskHubs` | 0 | 1 in scheduler | 5 task hubs for Consumption SKU | Reuse existing `default`; current count verified with `az durabletask taskhub list`. |
-| `Microsoft.ServiceBus/namespaces` | 0 | 1 used | Not applicable to this deployment | Reuse `agentvideo-namespace`; queue `ltx25msrjob` is active. |
+| `Microsoft.ServiceBus/namespaces` | 0 | 1 used | Not applicable to this deployment | Reuse the configured existing namespace and queue. |
 | `Microsoft.Insights/components` | 1 | 11 in `westus3` | No resource-count provisioning quota exposed | Existing count: 10. Data ingestion limits are plan-based. |
-| `Microsoft.OperationalInsights/workspaces` | 0 | 3 in `westus3` | No new workspace required | Reuse existing `workspaceagentsdcpp8688`. |
+| `Microsoft.OperationalInsights/workspaces` | 0 | 3 in `westus3` | No new workspace required | Reuse the existing workspace supplied by deployment variables. |
 
 **Status:** All planned resources are within verified limits.
 
@@ -165,7 +165,7 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 - [x] Analyze workspace and create private repository
 - [x] Gather requirements
 - [x] Confirm subscription and location
-- [x] Scan LTX 2.5, Pydantic MCP helper, and long-running MCP sample
+- [x] Scan the video worker, Pydantic MCP helper, and long-running MCP sample
 - [x] Select AZD/Bicep recipe
 - [x] Plan MCP, Service Bus, and DTS architecture
 - [x] Validate provisioning limits
@@ -208,7 +208,7 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 
 - [ ] Ask the user for explicit deployment approval
 - [ ] Invoke `azure-deploy` only after approval
-- [ ] Ask separately before changing settings or RBAC on existing `agentvideo` resources
+- [ ] Ask separately before changing settings or RBAC on existing production resources
 - [ ] Record deployed endpoint URLs and update status to `Deployed`
 
 ---
@@ -272,8 +272,7 @@ Quota checks used Azure CLI quota commands first. Unsupported providers use Azur
 - Service Bus: Python v2 output binding with the identity-based
   `fullyQualifiedNamespace`, `credential` and `clientId` settings and the
   `Azure Service Bus Data Sender` role.
-- LTX event payload verified against
-  `zecloud/func_tts_eurovibe/ltx25/function_app.py`: terminal events expose
+- Video event payload verified against the existing worker: terminal events expose
   `status`, `event_key`, `type_prefix`, optional `num_frames`, and `error`.
 - Existing Service Bus, DTS/task hub and Log Analytics resources are declared
   with Bicep `existing`; their RBAC assignments are gated off by default.
