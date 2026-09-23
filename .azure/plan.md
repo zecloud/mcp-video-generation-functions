@@ -110,7 +110,7 @@ Before any future Azure deployment, the existing video Function App must be conf
 
 - `DTS_EVENT_ENABLED=true`
 - `DTS_ENDPOINT` set from the production environment
-- `DTS_TASKHUB=default`
+- `DTS_TASKHUB` set to the value of `VIDEO_DTS_TASKHUB_NAME`
 - managed identity permission to raise events in the target DTS scheduler
 
 Changing these settings is an Azure modification and requires separate explicit approval.
