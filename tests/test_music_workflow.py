@@ -187,3 +187,8 @@ def test_aggregation_preserves_completed_failed_and_timeout_results():
     assert result.generations[2].blob_path.endswith(
         f"/{type_prefix_for('instance-1', 2, kind='music')}-video-42.flac"
     )
+    # type_prefix is the value create_music_video expects as music_track.
+    assert [item.type_prefix for item in result.generations] == [
+        type_prefix_for("instance-1", index, kind="music") for index in range(3)
+    ]
+    assert all(item.music_plan is None for item in result.generations)

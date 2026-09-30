@@ -20,16 +20,21 @@ from pydantic import BaseModel
 
 from media_workflow import run_media_orchestration
 from models import (
+    CompletedMusicVideoWorkflowResult,
     CompletedMusicWorkflowResult,
     CompletedWorkflowResult,
     CreateHDVideoInput,
     CreateMusicInput,
+    CreateMusicVideoInput,
     FailedWorkflowResult,
     GenerationResult,
     GetHDVideoResultInput,
     GetMusicResultInput,
+    GetMusicVideoResultInput,
     HDVideoWorkflowOutput,
     MusicMessage,
+    MusicVideoMessage,
+    MusicVideoWorkflowOutput,
     MusicWorkflowOutput,
     TrackSpec,
     VideoMessage,
@@ -46,6 +51,12 @@ from music_workflow import (
     aggregate_music_results,
     build_music_generation,
     serialize_music_message,
+)
+from music_video_workflow import (
+    MUSIC_VIDEO_GENERATION_INDEX,
+    aggregate_music_video_results,
+    build_music_video_generation,
+    serialize_music_video_message,
 )
 from video_workflow import (
     aggregate_generation_results,
@@ -72,6 +83,11 @@ MCP_WAIT_BUDGET_SECONDS = _positive_int_setting("MCP_WAIT_BUDGET_SECONDS", 20)
 MCP_POLL_INTERVAL_SECONDS = _positive_int_setting("MCP_POLL_INTERVAL_SECONDS", 5)
 ORCHESTRATION_TIMEOUT_SECONDS = _positive_int_setting(
     "ORCHESTRATION_TIMEOUT_SECONDS", 2 * 60 * 60
+)
+# Un clip musical demande ~29 min de GPU par minute de chanson : 4 h couvrent
+# une chanson d'environ 8 minutes.
+MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS = _positive_int_setting(
+    "MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS", 4 * 60 * 60
 )
 VIDEO_BLOB_BASE_URL = os.environ.get(
     "VIDEO_BLOB_BASE_URL",
@@ -109,12 +125,57 @@ def _describe_music(generation: GenerationResult) -> str:
 
 
 @dataclass(frozen=True)
+class ExtraResourceLink:
+    blob_path: str
+    description: str
+    mime_type: str
+
+
+@dataclass(frozen=True)
 class MediaProfile:
     output_model: type[BaseModel]
     completed_model: type[BaseModel]
     result_tool: str
     mime_type: str
     describe: Callable[[GenerationResult], str]
+    extra_links: Callable[[BaseModel], list[ExtraResourceLink]] | None = None
+
+
+def _describe_music_video(generation: GenerationResult) -> str:
+    frame_description = (
+        f", {generation.num_frames} images"
+        if generation.num_frames is not None
+        else ""
+    )
+    return f"{generation.prompt}{frame_description}."
+
+
+def _music_video_artifact_links(output: BaseModel) -> list[ExtraResourceLink]:
+    if not isinstance(output, MusicVideoWorkflowOutput) or not any(
+        generation.status == "completed" for generation in output.generations
+    ):
+        return []
+    artifacts = output.artifacts
+    return [
+        ExtraResourceLink(
+            blob_path=artifacts.music_plan_path,
+            description=(
+                "Plan musical (scènes calées sur le rythme et prompts), "
+                "réutilisable avec reuse_music_plan."
+            ),
+            mime_type="application/json",
+        ),
+        ExtraResourceLink(
+            blob_path=artifacts.scenes_srt_path,
+            description="Sous-titres des paroles corrigées, scène par scène.",
+            mime_type="application/x-subrip",
+        ),
+        ExtraResourceLink(
+            blob_path=artifacts.prompts_srt_path,
+            description="Prompts visuels de chaque scène au format SRT.",
+            mime_type="application/x-subrip",
+        ),
+    ]
 
 
 VIDEO_PROFILE = MediaProfile(
@@ -131,8 +192,17 @@ MUSIC_PROFILE = MediaProfile(
     mime_type="audio/flac",
     describe=_describe_music,
 )
+MUSIC_VIDEO_PROFILE = MediaProfile(
+    output_model=MusicVideoWorkflowOutput,
+    completed_model=CompletedMusicVideoWorkflowResult,
+    result_tool="get_music_video_result",
+    mime_type="video/mp4",
+    describe=_describe_music_video,
+    extra_links=_music_video_artifact_links,
+)
 _PROFILE_BY_COMPLETED_MODEL = {
-    profile.completed_model: profile for profile in (VIDEO_PROFILE, MUSIC_PROFILE)
+    profile.completed_model: profile
+    for profile in (VIDEO_PROFILE, MUSIC_PROFILE, MUSIC_VIDEO_PROFILE)
 }
 
 
@@ -246,6 +316,56 @@ def run_music_orchestrator(context: df.DurableOrchestrationContext):
     return result.model_dump(mode="json")
 
 
+@app.orchestration_trigger(context_name="context")
+def run_music_video_orchestrator(context: df.DurableOrchestrationContext):
+    orchestration_input = context.get_input()
+    if not isinstance(orchestration_input, dict):
+        raise ValueError("L’entrée d’orchestration doit être un objet JSON.")
+    terminal_result = orchestration_input.get("terminal_result")
+    if terminal_result is not None:
+        return MusicVideoWorkflowOutput.model_validate(terminal_result).model_dump(
+            mode="json"
+        )
+
+    request = CreateMusicVideoInput.model_validate(orchestration_input["request"])
+    instance_id = context.instance_id
+
+    def build_dispatch():
+        index = MUSIC_VIDEO_GENERATION_INDEX
+        event_key = f"{instance_id}:{index}:{context.new_uuid()}"
+        dts_event_name = f"music-video-{index}-{context.new_uuid()}"
+        descriptor, message = build_music_video_generation(
+            request,
+            instance_id=instance_id,
+            event_key=event_key,
+            dts_event_name=dts_event_name,
+        )
+        return [descriptor], [
+            {
+                "index": index,
+                "message": message.model_dump(mode="json", exclude_none=True),
+            }
+        ]
+
+    descriptors, event_payloads, timed_out_indexes = yield from run_media_orchestration(
+        context,
+        timeout_seconds=int(orchestration_input["timeout_seconds"]),
+        build_dispatch=build_dispatch,
+        activity_name="enqueue_music_video_generation",
+    )
+
+    result = aggregate_music_video_results(
+        request=request,
+        descriptors=descriptors,
+        event_payloads=event_payloads,
+        timed_out_indexes=timed_out_indexes,
+    )
+    if timed_out_indexes:
+        context.continue_as_new({"terminal_result": result.model_dump(mode="json")})
+        return None
+    return result.model_dump(mode="json")
+
+
 @app.activity_trigger(input_name="job")
 @app.service_bus_queue_output(
     arg_name="message",
@@ -271,6 +391,22 @@ def enqueue_video_generation(job: dict, message: func.Out[str]) -> dict:
 def enqueue_music_generation(job: dict, message: func.Out[str]) -> dict:
     body = MusicMessage.model_validate(job["message"])
     message.set(serialize_music_message(body))
+    return {
+        "index": job["index"],
+        "event_key": body.event_key,
+        "dts_event_name": body.dts_event_name,
+    }
+
+
+@app.activity_trigger(input_name="job")
+@app.service_bus_queue_output(
+    arg_name="message",
+    queue_name="%VIDEO_SERVICE_BUS_QUEUE_NAME%",
+    connection="ServiceBusConnection",
+)
+def enqueue_music_video_generation(job: dict, message: func.Out[str]) -> dict:
+    body = MusicVideoMessage.model_validate(job["message"])
+    message.set(serialize_music_video_message(body))
     return {
         "index": job["index"],
         "event_key": body.event_key,
@@ -388,6 +524,91 @@ async def get_music_result(
     )
 
 
+@app.mcp_tool()
+@pydantic_mcp_tool_properties(app, CreateMusicVideoInput)
+@app.durable_client_input(client_name="client")
+@validate_pydantic_arguments(CreateMusicVideoInput, strict=True)
+async def create_music_video(
+    client: df.DurableOrchestrationClient,
+    videoid: str,
+    music_track: str,
+    ref_speaker1_filename: str,
+    ref_speaker1_prompt: str,
+    ref_speaker2_filename: str | None = None,
+    ref_speaker2_prompt: str | None = None,
+    ref_speaker3_filename: str | None = None,
+    ref_speaker3_prompt: str | None = None,
+    ref_speaker4_filename: str | None = None,
+    ref_speaker4_prompt: str | None = None,
+    background_filename: str | None = None,
+    background_prompt: str | None = None,
+    orientation: Orientation = Orientation.VERTICAL,
+    lyrics: str | None = None,
+    theme_style: str | None = None,
+    story: str | None = None,
+    scene_min_seconds: float | None = None,
+    scene_max_seconds: float | None = None,
+    scene_bias: float | None = None,
+    whisper_language: str | None = None,
+    reuse_music_plan: bool = False,
+) -> List[ContentBlock]:
+    """Démarre le clip musical d'une chanson create_music (music_track = son type_prefix) et retourne le résultat ou un workflow_id. Compter ~29 min de calcul GPU par minute de chanson."""
+    request = CreateMusicVideoInput(
+        videoid=videoid,
+        music_track=music_track,
+        ref_speaker1_filename=ref_speaker1_filename,
+        ref_speaker1_prompt=ref_speaker1_prompt,
+        ref_speaker2_filename=ref_speaker2_filename,
+        ref_speaker2_prompt=ref_speaker2_prompt,
+        ref_speaker3_filename=ref_speaker3_filename,
+        ref_speaker3_prompt=ref_speaker3_prompt,
+        ref_speaker4_filename=ref_speaker4_filename,
+        ref_speaker4_prompt=ref_speaker4_prompt,
+        background_filename=background_filename,
+        background_prompt=background_prompt,
+        orientation=orientation,
+        lyrics=lyrics,
+        theme_style=theme_style,
+        story=story,
+        scene_min_seconds=scene_min_seconds,
+        scene_max_seconds=scene_max_seconds,
+        scene_bias=scene_bias,
+        whisper_language=whisper_language,
+        reuse_music_plan=reuse_music_plan,
+    )
+    instance_id = await client.start_new(
+        "run_music_video_orchestrator",
+        client_input={
+            "request": request.model_dump(mode="json", exclude_none=True),
+            "timeout_seconds": MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS,
+        },
+    )
+    logging.info("Started music video orchestration %s", instance_id)
+    result = await _wait_for_workflow(
+        client,
+        instance_id,
+        wait_budget_seconds=MCP_WAIT_BUDGET_SECONDS,
+        poll_interval_seconds=MCP_POLL_INTERVAL_SECONDS,
+        profile=MUSIC_VIDEO_PROFILE,
+    )
+    return await _to_content_blocks(result)
+
+
+@app.mcp_tool()
+@pydantic_mcp_tool_properties(app, GetMusicVideoResultInput)
+@app.durable_client_input(client_name="client")
+@validate_pydantic_arguments(GetMusicVideoResultInput, strict=True)
+async def get_music_video_result(
+    client: df.DurableOrchestrationClient,
+    workflow_id: str,
+) -> List[ContentBlock]:
+    """Retourne l'état et le résultat d'un workflow create_music_video."""
+    status = await client.get_status(workflow_id)
+    return await _to_content_blocks(
+        _workflow_response(status, workflow_id, profile=MUSIC_VIDEO_PROFILE)
+    )
+
+
 async def _wait_for_workflow(
     client: df.DurableOrchestrationClient,
     workflow_id: str,
@@ -488,10 +709,14 @@ async def _to_content_blocks(
         for generation in result.result.generations
         if generation.status == "completed"
     ]
+    extra_links = (
+        profile.extra_links(result.result) if profile.extra_links is not None else []
+    )
     provider = sas_uri_provider or generate_media_sas_uris
     try:
         sas_uris = await provider(
-            [generation.blob_path for generation in completed_generations],
+            [generation.blob_path for generation in completed_generations]
+            + [link.blob_path for link in extra_links],
             base_url=VIDEO_BLOB_BASE_URL,
             ttl_seconds=VIDEO_SAS_TTL_SECONDS,
         )
@@ -510,6 +735,16 @@ async def _to_content_blocks(
                 name=filename,
                 description=profile.describe(generation),
                 mimeType=profile.mime_type,
+            )
+        )
+    for link in extra_links:
+        blocks.append(
+            ResourceLink(
+                type="resource_link",
+                uri=sas_uris[link.blob_path],
+                name=link.blob_path.rsplit("/", 1)[-1],
+                description=link.description,
+                mimeType=link.mime_type,
             )
         )
     return blocks

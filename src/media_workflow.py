@@ -91,6 +91,7 @@ def aggregate_results(
                     prompt=descriptor.prompt,
                     status="timeout",
                     blob_path=descriptor.blob_path,
+                    type_prefix=descriptor.type_prefix,
                     error="Délai maximal de génération dépassé.",
                 )
             )
@@ -104,13 +105,20 @@ def aggregate_results(
 
             status = str(payload.get("status", "")).strip().lower()
             if status == "completed":
+                music_plan = payload.get("music_plan")
                 results.append(
                     GenerationResult(
                         index=descriptor.index,
                         prompt=descriptor.prompt,
                         status="completed",
                         blob_path=descriptor.blob_path,
+                        type_prefix=descriptor.type_prefix,
                         num_frames=payload.get("num_frames"),
+                        music_plan=(
+                            music_plan
+                            if isinstance(music_plan, str) and music_plan.strip()
+                            else None
+                        ),
                     )
                 )
             else:
@@ -121,6 +129,7 @@ def aggregate_results(
                         prompt=descriptor.prompt,
                         status="failed",
                         blob_path=descriptor.blob_path,
+                        type_prefix=descriptor.type_prefix,
                         error=error,
                     )
                 )
@@ -131,6 +140,7 @@ def aggregate_results(
                     prompt=descriptor.prompt,
                     status="failed",
                     blob_path=descriptor.blob_path,
+                    type_prefix=descriptor.type_prefix,
                     error=f"Résultat de génération invalide : {exc}",
                 )
             )

@@ -78,6 +78,9 @@ param mcpWaitBudgetSeconds int = 20
 param mcpPollIntervalSeconds int = 5
 @minValue(1)
 param orchestrationTimeoutSeconds int = 7200
+@description('Timeout du workflow create_music_video : ~29 min de GPU par minute de chanson, 4 h par défaut.')
+@minValue(1)
+param musicVideoOrchestrationTimeoutSeconds int = 14400
 @minValue(1)
 @maxValue(86400)
 param videoSasTtlSeconds int = 3600
@@ -223,6 +226,7 @@ module api './app/api.bicep' = {
       MCP_WAIT_BUDGET_SECONDS: '${mcpWaitBudgetSeconds}'
       MCP_POLL_INTERVAL_SECONDS: '${mcpPollIntervalSeconds}'
       ORCHESTRATION_TIMEOUT_SECONDS: '${orchestrationTimeoutSeconds}'
+      MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS: '${musicVideoOrchestrationTimeoutSeconds}'
       VIDEO_BLOB_BASE_URL: videoBlobBaseUrl
       VIDEO_BLOB_PATH_PREFIX: videoBlobPathPrefix
       VIDEO_SAS_TTL_SECONDS: '${videoSasTtlSeconds}'
