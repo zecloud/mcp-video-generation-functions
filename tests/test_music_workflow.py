@@ -1,0 +1,189 @@
+import json
+
+import pytest
+from pydantic import ValidationError
+
+from models import (
+    CreateMusicInput,
+    MusicLora,
+    MusicMessage,
+    SERVICE_BUS_BODY_BUDGET_BYTES,
+    TrackSpec,
+)
+from music_workflow import (
+    MUSIC_LABEL_MAX_LENGTH,
+    aggregate_music_results,
+    build_music_generation,
+    output_blob_path,
+    serialize_music_message,
+    track_label,
+)
+from media_workflow import seed_for_event_key, type_prefix_for
+from video_workflow import type_prefix_for as video_type_prefix_for
+
+
+def make_request():
+    return CreateMusicInput(
+        videoid="video-42",
+        tracks=[
+            {"style": "epic orchestral trailer", "lyrics": "[instrumental]"},
+            {
+                "style": "industrial rock",
+                "lyrics": "[verse] acier et fumée",
+                "lora": "industrial_rock",
+            },
+        ],
+    )
+
+
+def test_message_mapping_carries_track_fields_and_correlation():
+    descriptor, message = build_music_generation(
+        make_request(),
+        index=1,
+        instance_id="instance-1",
+        event_key="event-key-1",
+        dts_event_name="music-1-uuid",
+    )
+
+    type_prefix = type_prefix_for("instance-1", 1, kind="music")
+    assert message.model_dump(mode="json", exclude_none=True) == {
+        "videoid": "video-42",
+        "style": "industrial rock",
+        "lyrics": "[verse] acier et fumée",
+        "lora": "industrial_rock",
+        "type_prefix": type_prefix,
+        "instance_id": "instance-1",
+        "event_key": "event-key-1",
+        "dts_event_name": "music-1-uuid",
+        "seed": seed_for_event_key("event-key-1"),
+    }
+    assert descriptor.prompt == "industrial rock (industrial_rock)"
+    assert descriptor.blob_path == f"video/video-42/{type_prefix}-video-42.flac"
+
+
+def test_optional_lora_is_omitted_from_serialized_message():
+    _, message = build_music_generation(
+        make_request(),
+        index=0,
+        instance_id="instance-1",
+        event_key="event-key-0",
+        dts_event_name="music-0-uuid",
+    )
+
+    assert message.lora is None
+    assert "lora" not in json.loads(serialize_music_message(message))
+
+
+def test_music_output_shares_video_working_folder_with_flac_extension():
+    assert output_blob_path("video-42", "music-token-001") == (
+        "video/video-42/music-token-001-video-42.flac"
+    )
+
+
+def test_music_and_video_type_prefixes_never_collide():
+    assert type_prefix_for("instance-1", 0, kind="music") != video_type_prefix_for(
+        "instance-1", 0
+    )
+    assert type_prefix_for("instance-1", 0, kind="music").startswith("music-")
+
+
+def test_track_label_truncates_long_styles():
+    label = track_label(TrackSpec(style="a" * 200, lyrics="[instrumental]"))
+
+    assert len(label) == MUSIC_LABEL_MAX_LENGTH
+    assert label.endswith("…")
+
+
+def test_unknown_lora_is_rejected():
+    with pytest.raises(ValidationError):
+        TrackSpec(style="rock", lyrics="[verse]", lora="synthwave")
+
+    assert TrackSpec(
+        style="rock", lyrics="[verse]", lora="two_steps_from_hell"
+    ).lora is MusicLora.TWO_STEPS_FROM_HELL
+
+
+def test_tracks_accept_json_string_payload_from_mcp_trigger():
+    request = CreateMusicInput(
+        videoid="video-42",
+        tracks=json.dumps(
+            [{"style": "ambient", "lyrics": "[instrumental]"}],
+            ensure_ascii=False,
+        ),
+    )
+
+    assert request.tracks[0].style == "ambient"
+
+
+def test_lyrics_over_service_bus_budget_are_rejected():
+    with pytest.raises(ValidationError, match="enveloppe Service Bus"):
+        CreateMusicInput(
+            videoid="video-42",
+            tracks=[
+                {
+                    "style": "rock",
+                    "lyrics": "😀" * (SERVICE_BUS_BODY_BUDGET_BYTES // 4),
+                }
+            ],
+        )
+
+
+def test_final_serialized_message_over_service_bus_budget_is_rejected():
+    message = MusicMessage(
+        videoid="video-42",
+        style="rock",
+        lyrics="😀" * (SERVICE_BUS_BODY_BUDGET_BYTES // 4),
+        type_prefix="music-token-001",
+        instance_id="instance-1",
+        event_key="event-key-1",
+        dts_event_name="music-0-uuid",
+        seed=42,
+    )
+
+    with pytest.raises(ValueError, match="limite Service Bus Basic"):
+        serialize_music_message(message)
+
+
+def test_aggregation_preserves_completed_failed_and_timeout_results():
+    request = CreateMusicInput(
+        videoid="video-42",
+        tracks=[
+            {"style": f"style {index}", "lyrics": "[instrumental]"}
+            for index in range(3)
+        ],
+    )
+    descriptors = [
+        build_music_generation(
+            request,
+            index=index,
+            instance_id="instance-1",
+            event_key=f"key-{index}",
+            dts_event_name=f"music-{index}-uuid",
+        )[0]
+        for index in range(3)
+    ]
+
+    result = aggregate_music_results(
+        request=request,
+        descriptors=descriptors,
+        event_payloads={
+            0: {"status": "completed", "event_key": "key-0"},
+            1: {
+                "status": "failed",
+                "event_key": "key-1",
+                "error": "GPU unavailable",
+            },
+        },
+        timed_out_indexes={2},
+    )
+
+    assert result.videoid == "video-42"
+    assert [item.status for item in result.generations] == [
+        "completed",
+        "failed",
+        "timeout",
+    ]
+    assert result.generations[1].error == "GPU unavailable"
+    assert result.generations[2].blob_path.endswith(
+        f"/{type_prefix_for('instance-1', 2, kind='music')}-video-42.flac"
+    )

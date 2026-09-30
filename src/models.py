@@ -38,9 +38,17 @@ NonEmptyString = Annotated[
 ]
 
 
+MAX_TRACKS = 64
+
+
 class Orientation(str, Enum):
     VERTICAL = "Vertical"
     HORIZONTAL = "Horizontal"
+
+
+class MusicLora(str, Enum):
+    TWO_STEPS_FROM_HELL = "two_steps_from_hell"
+    INDUSTRIAL_ROCK = "industrial_rock"
 
 
 class ReferenceSpec(BaseModel):
@@ -314,6 +322,126 @@ class VideoMessage(BaseModel):
     seed: int = Field(ge=0, le=2_147_483_647)
 
 
+class TrackSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    style: NonEmptyString = Field(
+        description=(
+            "Style musical du morceau "
+            "(ex. « epic orchestral trailer, choir, taiko drums »)."
+        )
+    )
+    lyrics: NonEmptyString = Field(
+        description=(
+            "Paroles complètes du morceau, balises de structure comprises "
+            "(ex. [verse], [chorus]). Utilisez [instrumental] pour un morceau "
+            "sans voix."
+        )
+    )
+    lora: MusicLora | None = Field(
+        default=None,
+        description="LoRA optionnel appliqué à la génération du morceau.",
+    )
+
+    @field_validator("lora", mode="before")
+    @classmethod
+    def parse_lora(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return MusicLora(value)
+            except ValueError:
+                return value
+        return value
+
+
+class CreateMusicInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    videoid: NonEmptyString = Field(
+        description=(
+            "Identifiant du dossier de travail existant, partagé avec la vidéo."
+        )
+    )
+    tracks: List[TrackSpec] = Field(
+        min_length=1,
+        max_length=MAX_TRACKS,
+        description=(
+            "Liste non vide des morceaux à générer ; chaque morceau porte son "
+            "style, ses paroles et son LoRA optionnel, et donne lieu à une "
+            "génération parallèle."
+        ),
+    )
+
+    @field_validator("tracks", mode="before")
+    @classmethod
+    def decode_tracks(cls, value: Any) -> Any:
+        # Le déclencheur MCP peut transmettre le tableau sous forme de chaîne JSON.
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+        return value
+
+    @model_validator(mode="after")
+    def validate_transport_budgets(self) -> "CreateMusicInput":
+        request_size = len(self.model_dump_json(exclude_none=True).encode("utf-8"))
+        if request_size > DTS_INPUT_BUDGET_BYTES:
+            raise ValueError(
+                f"L’entrée DTS occupe {request_size} octets UTF-8 ; "
+                f"le budget avec marge est {DTS_INPUT_BUDGET_BYTES} octets."
+            )
+
+        for index, track in enumerate(self.tracks):
+            message_content: dict[str, Any] = {
+                "videoid": self.videoid,
+                "style": track.style,
+                "lyrics": track.lyrics,
+            }
+            if track.lora is not None:
+                message_content["lora"] = track.lora.value
+            user_content_size = len(
+                json.dumps(
+                    message_content,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            if (
+                user_content_size
+                > SERVICE_BUS_BODY_BUDGET_BYTES
+                - SERVICE_BUS_DYNAMIC_ENVELOPE_BUDGET_BYTES
+            ):
+                raise ValueError(
+                    f"Le contenu utilisateur du message tracks[{index}] occupe "
+                    f"{user_content_size} octets UTF-8 ; il ne laisse pas la marge "
+                    "requise pour l’enveloppe Service Bus."
+                )
+        return self
+
+
+class GetMusicResultInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: NonEmptyString = Field(
+        description="Identifiant workflow_id retourné par create_music."
+    )
+
+
+class MusicMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    videoid: NonEmptyString
+    style: NonEmptyString
+    lyrics: NonEmptyString
+    lora: MusicLora | None = None
+    type_prefix: NonEmptyString
+    instance_id: NonEmptyString
+    event_key: NonEmptyString
+    dts_event_name: NonEmptyString
+    seed: int = Field(ge=0, le=2_147_483_647)
+
+
 class GenerationDescriptor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -329,6 +457,7 @@ class GenerationResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     index: int = Field(ge=0)
+    # Libellé de la génération : la narration côté vidéo, le style côté musique.
     prompt: NonEmptyString
     status: Literal["completed", "failed", "timeout"]
     blob_path: NonEmptyString
@@ -344,6 +473,13 @@ class HDVideoWorkflowOutput(BaseModel):
     generations: list[GenerationResult]
 
 
+class MusicWorkflowOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    videoid: NonEmptyString
+    generations: list[GenerationResult]
+
+
 class RunningWorkflowResult(BaseModel):
     status: Literal["running"] = "running"
     workflow_id: NonEmptyString
@@ -355,6 +491,12 @@ class CompletedWorkflowResult(BaseModel):
     status: Literal["completed"] = "completed"
     workflow_id: NonEmptyString
     result: HDVideoWorkflowOutput
+
+
+class CompletedMusicWorkflowResult(BaseModel):
+    status: Literal["completed"] = "completed"
+    workflow_id: NonEmptyString
+    result: MusicWorkflowOutput
 
 
 class FailedWorkflowResult(BaseModel):

@@ -20,6 +20,9 @@
     "serviceBusQueueName": {
       "value": "${VIDEO_SERVICE_BUS_QUEUE_NAME}"
     },
+    "musicServiceBusQueueName": {
+      "value": "${MUSIC_SERVICE_BUS_QUEUE_NAME}"
+    },
     "dtsResourceGroupName": {
       "value": "${VIDEO_DTS_RESOURCE_GROUP_NAME}"
     },

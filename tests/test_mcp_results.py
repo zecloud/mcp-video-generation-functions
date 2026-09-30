@@ -5,11 +5,14 @@ from dataclasses import dataclass
 from azure.core.exceptions import AzureError
 from azure.functions import mcp as functions_mcp
 from function_app import (
+    MUSIC_PROFILE,
+    _running_result,
     _to_content_blocks,
     _wait_for_workflow,
     _workflow_response,
 )
 from mcp.types import ResourceLink, TextContent
+from models import CompletedMusicWorkflowResult
 
 
 @dataclass
@@ -228,3 +231,49 @@ def test_completed_result_keeps_status_when_storage_sas_is_unavailable():
     assert len(blocks) == 1
     assert isinstance(blocks[0], TextContent)
     assert '"status":"completed"' in blocks[0].text
+
+
+def music_workflow_output():
+    return {
+        "videoid": "video-42",
+        "generations": [
+            {
+                "index": 0,
+                "prompt": "industrial rock (industrial_rock)",
+                "status": "completed",
+                "blob_path": "video/video-42/music-001-video-42.flac",
+            }
+        ],
+    }
+
+
+def test_completed_music_result_returns_audio_resource_link():
+    result = _workflow_response(
+        DurableStatus(
+            RuntimeStatus("Completed"),
+            "workflow-1",
+            music_workflow_output(),
+        ),
+        "workflow-1",
+        profile=MUSIC_PROFILE,
+    )
+
+    assert isinstance(result, CompletedMusicWorkflowResult)
+
+    blocks = asyncio.run(
+        _to_content_blocks(result, sas_uri_provider=fake_sas_uri_provider)
+    )
+
+    assert len(blocks) == 2
+    assert isinstance(blocks[1], ResourceLink)
+    assert blocks[1].mimeType == "audio/flac"
+    assert blocks[1].name == "music-001-video-42.flac"
+    assert blocks[1].description == (
+        "Morceau généré pour la piste 1 (industrial rock (industrial_rock))."
+    )
+
+
+def test_music_running_result_points_to_get_music_result():
+    result = _running_result("workflow-1", profile=MUSIC_PROFILE)
+
+    assert "get_music_result" in result.next

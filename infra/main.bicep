@@ -60,6 +60,7 @@ param assignExistingResourceRoles bool = false
 param serviceBusResourceGroupName string
 param serviceBusNamespaceName string
 param serviceBusQueueName string
+param musicServiceBusQueueName string
 param dtsResourceGroupName string
 param dtsSchedulerName string
 param dtsTaskHubName string
@@ -166,6 +167,7 @@ module existingDependencies './app/existing-dependencies.bicep' = {
     serviceBusResourceGroupName: serviceBusResourceGroupName
     serviceBusNamespaceName: serviceBusNamespaceName
     serviceBusQueueName: serviceBusQueueName
+    musicServiceBusQueueName: musicServiceBusQueueName
     dtsResourceGroupName: dtsResourceGroupName
     dtsSchedulerName: dtsSchedulerName
     dtsTaskHubName: dtsTaskHubName

@@ -1,8 +1,10 @@
-# MCP HD video generation
+# MCP HD video and music generation
 
-Azure Functions Python 3.13 MCP server that starts one video generation per
-prompt, sends all jobs to the configured Service Bus queue, and
-collects their Durable Task Scheduler events.
+Azure Functions Python 3.13 MCP server that starts one media generation per
+prompt or track, sends all jobs to the matching Service Bus queue, and
+collects their Durable Task Scheduler events. Video and music share the same
+orchestration core (`src/media_workflow.py`), the same working folder, and two
+dedicated queues.
 
 ## MCP tools
 
@@ -11,11 +13,26 @@ collects their Durable Task Scheduler events.
   completed result inline or a `workflow_id`.
 - `get_hd_video_result` accepts a required, strongly validated `workflow_id`
   and returns `running`, `completed`, `failed`, or `not_found`.
+- `create_music` validates `CreateMusicInput` (an existing `videoid` plus a
+  non-empty list of tracks, each with `style`, `lyrics` and an optional `lora`
+  among `two_steps_from_hell` and `industrial_rock`) and runs the same
+  fan-out/fan-in orchestration on the music queue.
+- `get_music_result` mirrors `get_hd_video_result` for music workflows.
 
-Both tools return `List[ContentBlock]`. The first block is a `TextContent`
+All tools return `List[ContentBlock]`. The first block is a `TextContent`
 containing the JSON status contract used for polling. A completed response also
 contains one `ResourceLink` per successful generation, with
-`mimeType="video/mp4"` and a short-lived, read-only user delegation SAS URL.
+`mimeType="video/mp4"` or `mimeType="audio/flac"` and a short-lived, read-only
+user delegation SAS URL.
+
+Music generations reuse the video working folder
+(`{VIDEO_BLOB_PATH_PREFIX}/{videoid}/`) and are written as `.flac`. Their
+`type_prefix` starts with `music-` instead of `hdvideo-`, so both media types
+coexist without collision. The queue message carries `videoid`, `style`,
+`lyrics`, the optional `lora`, and the same correlation fields
+(`type_prefix`, `instance_id`, `event_key`, `dts_event_name`, `seed`). The
+worker answers on the DTS event `music-{index}-{uuid}` with the same
+`status` / `event_key` / `error` / `retryable` contract as video.
 
 Every generation result contains its prompt/index, terminal status,
 deterministic blob path, optional `num_frames`, and any error or timeout.
@@ -32,7 +49,7 @@ completes with timeout results.
 
 Transport limits are enforced on UTF-8 bytes rather than character counts:
 
-- at most 64 prompts per workflow;
+- at most 64 prompts (or 64 tracks) per workflow;
 - DTS input is capped at 960 KiB, retaining 64 KiB for the orchestration wrapper;
 - each Service Bus body is capped at 252 KiB, retaining 4 KiB below the Basic
   tier's 256 KiB limit;
@@ -61,7 +78,8 @@ packages.
 
 Production resource identifiers are injected through AZD environment variables:
 `VIDEO_SERVICE_BUS_RESOURCE_GROUP_NAME`, `VIDEO_SERVICE_BUS_NAMESPACE_NAME`,
-`VIDEO_SERVICE_BUS_QUEUE_NAME`, `VIDEO_DTS_RESOURCE_GROUP_NAME`,
+`VIDEO_SERVICE_BUS_QUEUE_NAME`, `MUSIC_SERVICE_BUS_QUEUE_NAME`,
+`VIDEO_DTS_RESOURCE_GROUP_NAME`,
 `VIDEO_DTS_SCHEDULER_NAME`, `VIDEO_DTS_TASKHUB_NAME`, `VIDEO_DTS_ENDPOINT`,
 `VIDEO_LOG_ANALYTICS_RESOURCE_GROUP_NAME`,
 `VIDEO_LOG_ANALYTICS_WORKSPACE_NAME`, `VIDEO_STORAGE_RESOURCE_GROUP_NAME`,
@@ -81,8 +99,9 @@ SDK 2.x support requires a later Azure Functions release.
 | `ORCHESTRATION_TIMEOUT_SECONDS` | `7200`, durable global timeout |
 | `VIDEO_BLOB_BASE_URL` | HTTPS Blob URL prefix for generated videos |
 | `VIDEO_SAS_TTL_SECONDS` | `3600`, lifetime of read-only video SAS links; maximum 86400 |
-| `VIDEO_SERVICE_BUS_QUEUE_NAME` | Service Bus queue name, injected per environment |
-| `VIDEO_BLOB_PATH_PREFIX` | Blob container and path prefix, injected per environment |
+| `VIDEO_SERVICE_BUS_QUEUE_NAME` | Video Service Bus queue name, injected per environment |
+| `MUSIC_SERVICE_BUS_QUEUE_NAME` | Music Service Bus queue name in the same namespace, injected per environment |
+| `VIDEO_BLOB_PATH_PREFIX` | Blob container and path prefix shared by video and music, injected per environment |
 | `VIDEO_FUNCTION_APP_NAME` | GitHub Actions variable containing the Function App name |
 | `ServiceBusConnection__fullyQualifiedNamespace` | Existing namespace endpoint |
 | `ServiceBusConnection__credential` | `managedidentity` |

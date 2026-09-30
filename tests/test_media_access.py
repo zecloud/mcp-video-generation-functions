@@ -3,8 +3,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-import video_access
-from video_access import generate_video_sas_uris, video_blob_location
+import media_access
+from media_access import generate_media_sas_uris, media_blob_location
 
 
 class FakeCredential:
@@ -32,8 +32,8 @@ class FakeBlobServiceClient:
         return object()
 
 
-def test_video_blob_location_encodes_multibyte_path():
-    location = video_blob_location(
+def test_media_blob_location_encodes_multibyte_path():
+    location = media_blob_location(
         "video/vidéo 42/fichier final.mp4",
         "https://storage.example.invalid/"
         "video",
@@ -47,9 +47,9 @@ def test_video_blob_location_encodes_multibyte_path():
     )
 
 
-def test_video_blob_location_rejects_non_https_base_url():
+def test_media_blob_location_rejects_non_https_base_url():
     with pytest.raises(ValueError, match="HTTPS"):
-        video_blob_location(
+        media_blob_location(
             "video/video/file.mp4",
             "http://storage.example.invalid/"
             "video",
@@ -57,10 +57,10 @@ def test_video_blob_location_rejects_non_https_base_url():
 
 
 @pytest.mark.parametrize("ttl_seconds", [0, 86401])
-def test_generate_video_sas_uris_rejects_invalid_ttl(ttl_seconds):
+def test_generate_media_sas_uris_rejects_invalid_ttl(ttl_seconds):
     with pytest.raises(ValueError, match="comprise entre 1 et 86400"):
         asyncio.run(
-            generate_video_sas_uris(
+            generate_media_sas_uris(
                 [],
                 base_url=(
                     "https://storage.example.invalid/"
@@ -71,7 +71,7 @@ def test_generate_video_sas_uris_rejects_invalid_ttl(ttl_seconds):
         )
 
 
-def test_generate_video_sas_uris_uses_one_delegation_key(monkeypatch):
+def test_generate_media_sas_uris_uses_one_delegation_key(monkeypatch):
     credential = FakeCredential()
     clients = []
     sas_calls = []
@@ -85,7 +85,7 @@ def test_generate_video_sas_uris_uses_one_delegation_key(monkeypatch):
         sas_calls.append(kwargs)
         return f"sp=r&sig=signature-{len(sas_calls)}"
 
-    monkeypatch.setattr(video_access, "generate_blob_sas", fake_generate_blob_sas)
+    monkeypatch.setattr(media_access, "generate_blob_sas", fake_generate_blob_sas)
     issued_at = datetime(2026, 8, 28, 9, 0, tzinfo=timezone.utc)
     blob_paths = [
         "video/video-42/first.mp4",
@@ -93,7 +93,7 @@ def test_generate_video_sas_uris_uses_one_delegation_key(monkeypatch):
     ]
 
     uris = asyncio.run(
-        generate_video_sas_uris(
+        generate_media_sas_uris(
             blob_paths,
             base_url=(
                 "https://storage.example.invalid/"

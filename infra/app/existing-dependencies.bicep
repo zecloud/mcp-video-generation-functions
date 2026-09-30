@@ -10,6 +10,7 @@ param assignExistingResourceRoles bool = false
 param serviceBusResourceGroupName string
 param serviceBusNamespaceName string
 param serviceBusQueueName string
+param musicServiceBusQueueName string
 param dtsResourceGroupName string
 param dtsSchedulerName string
 param dtsTaskHubName string
@@ -27,6 +28,11 @@ resource serviceBusNamespace 'Microsoft.ServiceBus/namespaces@2024-01-01' existi
 resource serviceBusQueue 'Microsoft.ServiceBus/namespaces/queues@2024-01-01' existing = {
   parent: serviceBusNamespace
   name: serviceBusQueueName
+}
+
+resource musicServiceBusQueue 'Microsoft.ServiceBus/namespaces/queues@2024-01-01' existing = {
+  parent: serviceBusNamespace
+  name: musicServiceBusQueueName
 }
 
 resource dtsScheduler 'Microsoft.DurableTask/schedulers@2025-04-01-preview' existing = {
@@ -62,6 +68,19 @@ module serviceBusRbac './servicebus-rbac.bicep' = if (assignExistingResourceRole
   }
 }
 
+module musicServiceBusRbac './servicebus-rbac.bicep' = if (assignExistingResourceRoles) {
+  name: '${name}-music-servicebus-rbac'
+  scope: resourceGroup(serviceBusResourceGroupName)
+  params: {
+    name: '${name}-music'
+    location: location
+    tags: tags
+    namespaceName: serviceBusNamespaceName
+    queueName: musicServiceBusQueueName
+    managedIdentityPrincipalId: managedIdentityPrincipalId
+  }
+}
+
 module dtsRbac './dts-rbac.bicep' = if (assignExistingResourceRoles) {
   name: '${name}-dts-rbac'
   scope: resourceGroup(dtsResourceGroupName)
@@ -91,6 +110,7 @@ output appSettings object = {
   ServiceBusConnection__credential: 'managedidentity'
   ServiceBusConnection__clientId: managedIdentityClientId
   VIDEO_SERVICE_BUS_QUEUE_NAME: serviceBusQueue.name
+  MUSIC_SERVICE_BUS_QUEUE_NAME: musicServiceBusQueue.name
   DURABLE_TASK_SCHEDULER_CONNECTION_STRING: 'Endpoint=${dtsEndpoint};TaskHub=${dtsTaskHub.name};Authentication=ManagedIdentity;ClientID=${managedIdentityClientId}'
   TASKHUB_NAME: dtsTaskHub.name
 }
