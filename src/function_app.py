@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import time
-from datetime import timedelta
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, List
 
 import azure.durable_functions as df
@@ -18,26 +18,38 @@ from AzureFunctionsMCPPydanticTool import (
 from mcp.types import ContentBlock, ResourceLink, TextContent
 from pydantic import BaseModel
 
+from media_workflow import run_media_orchestration
 from models import (
+    CompletedMusicWorkflowResult,
     CompletedWorkflowResult,
     CreateHDVideoInput,
+    CreateMusicInput,
     FailedWorkflowResult,
+    GenerationResult,
     GetHDVideoResultInput,
+    GetMusicResultInput,
     HDVideoWorkflowOutput,
+    MusicMessage,
+    MusicWorkflowOutput,
+    TrackSpec,
     VideoMessage,
     NotFoundWorkflowResult,
     Orientation,
     RunningWorkflowResult,
 )
-from video_access import (
-    DEFAULT_VIDEO_SAS_TTL_SECONDS,
-    MAX_VIDEO_SAS_TTL_SECONDS,
-    generate_video_sas_uris,
+from media_access import (
+    DEFAULT_MEDIA_SAS_TTL_SECONDS,
+    MAX_MEDIA_SAS_TTL_SECONDS,
+    generate_media_sas_uris,
+)
+from music_workflow import (
+    aggregate_music_results,
+    build_music_generation,
+    serialize_music_message,
 )
 from video_workflow import (
     aggregate_generation_results,
     build_generation,
-    is_retryable_failure_event,
     serialize_video_message,
 )
 
@@ -67,14 +79,61 @@ VIDEO_BLOB_BASE_URL = os.environ.get(
 ).rstrip("/")
 VIDEO_SAS_TTL_SECONDS = _positive_int_setting(
     "VIDEO_SAS_TTL_SECONDS",
-    DEFAULT_VIDEO_SAS_TTL_SECONDS,
+    DEFAULT_MEDIA_SAS_TTL_SECONDS,
 )
-if VIDEO_SAS_TTL_SECONDS > MAX_VIDEO_SAS_TTL_SECONDS:
+if VIDEO_SAS_TTL_SECONDS > MAX_MEDIA_SAS_TTL_SECONDS:
     raise ValueError(
-        f"VIDEO_SAS_TTL_SECONDS ne doit pas dépasser {MAX_VIDEO_SAS_TTL_SECONDS}."
+        f"VIDEO_SAS_TTL_SECONDS ne doit pas dépasser {MAX_MEDIA_SAS_TTL_SECONDS}."
     )
 
 SasUriProvider = Callable[..., Awaitable[dict[str, str]]]
+
+
+def _describe_video(generation: GenerationResult) -> str:
+    frame_description = (
+        f", {generation.num_frames} images"
+        if generation.num_frames is not None
+        else ""
+    )
+    return (
+        f"Vidéo HD générée pour le prompt {generation.index + 1}"
+        f"{frame_description}."
+    )
+
+
+def _describe_music(generation: GenerationResult) -> str:
+    return (
+        f"Morceau généré pour la piste {generation.index + 1} "
+        f"({generation.prompt})."
+    )
+
+
+@dataclass(frozen=True)
+class MediaProfile:
+    output_model: type[BaseModel]
+    completed_model: type[BaseModel]
+    result_tool: str
+    mime_type: str
+    describe: Callable[[GenerationResult], str]
+
+
+VIDEO_PROFILE = MediaProfile(
+    output_model=HDVideoWorkflowOutput,
+    completed_model=CompletedWorkflowResult,
+    result_tool="get_hd_video_result",
+    mime_type="video/mp4",
+    describe=_describe_video,
+)
+MUSIC_PROFILE = MediaProfile(
+    output_model=MusicWorkflowOutput,
+    completed_model=CompletedMusicWorkflowResult,
+    result_tool="get_music_result",
+    mime_type="audio/flac",
+    describe=_describe_music,
+)
+_PROFILE_BY_COMPLETED_MODEL = {
+    profile.completed_model: profile for profile in (VIDEO_PROFILE, MUSIC_PROFILE)
+}
 
 
 @app.orchestration_trigger(context_name="context")
@@ -89,110 +148,37 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
         )
 
     request = CreateHDVideoInput.model_validate(orchestration_input["request"])
-    timeout_seconds = int(orchestration_input["timeout_seconds"])
     instance_id = context.instance_id
-    deadline = context.current_utc_datetime + timedelta(seconds=timeout_seconds)
-    timeout_task = context.create_timer(deadline)
 
-    descriptors = []
-    dispatch_tasks = []
-    for index in range(len(request.prompts)):
-        event_key = f"{instance_id}:{index}:{context.new_uuid()}"
-        dts_event_name = f"video-hd-{index}-{context.new_uuid()}"
-        descriptor, message = build_generation(
-            request,
-            index=index,
-            instance_id=instance_id,
-            event_key=event_key,
-            dts_event_name=dts_event_name,
-        )
-        descriptors.append(descriptor)
-        dispatch_tasks.append(
-            context.call_activity(
-                "enqueue_video_generation",
+    def build_dispatch():
+        descriptors = []
+        payloads = []
+        for index in range(len(request.prompts)):
+            event_key = f"{instance_id}:{index}:{context.new_uuid()}"
+            dts_event_name = f"video-hd-{index}-{context.new_uuid()}"
+            descriptor, message = build_generation(
+                request,
+                index=index,
+                instance_id=instance_id,
+                event_key=event_key,
+                dts_event_name=dts_event_name,
+            )
+            descriptors.append(descriptor)
+            payloads.append(
                 {
                     "index": index,
                     "message": message.model_dump(mode="json", exclude_none=True),
-                },
+                }
             )
-        )
+        return descriptors, payloads
 
-    event_payloads: dict[int, Any] = {}
-    pending_dispatches = list(enumerate(dispatch_tasks))
-    while pending_dispatches:
-        winner = yield context.task_any(
-            [timeout_task, *[task for _, task in pending_dispatches]]
-        )
-        if winner == timeout_task:
-            result = aggregate_generation_results(
-                request=request,
-                descriptors=descriptors,
-                event_payloads=event_payloads,
-                timed_out_indexes={
-                    descriptor.index
-                    for descriptor in descriptors
-                    if descriptor.index not in event_payloads
-                },
-            )
-            context.continue_as_new(
-                {"terminal_result": result.model_dump(mode="json")}
-            )
-            return None
+    descriptors, event_payloads, timed_out_indexes = yield from run_media_orchestration(
+        context,
+        timeout_seconds=int(orchestration_input["timeout_seconds"]),
+        build_dispatch=build_dispatch,
+        activity_name="enqueue_video_generation",
+    )
 
-        for position, (index, dispatch_task) in enumerate(pending_dispatches):
-            if winner == dispatch_task:
-                state_name = getattr(getattr(winner, "state", None), "name", None)
-                if state_name == "FAILED" or isinstance(winner.result, Exception):
-                    error = winner.result
-                    event_payloads[index] = {
-                        "status": "failed",
-                        "event_key": descriptors[index].event_key,
-                        "error": f"Envoi Service Bus impossible : {error}",
-                    }
-                pending_dispatches.pop(position)
-                break
-        else:
-            raise RuntimeError("Durable task_any a retourné une activité inconnue.")
-
-    pending_events = [
-        (
-            descriptor.index,
-            descriptor.dts_event_name,
-            context.wait_for_external_event(descriptor.dts_event_name),
-        )
-        for descriptor in descriptors
-        if descriptor.index not in event_payloads
-    ]
-
-    while pending_events:
-        winner = yield context.task_any(
-            [timeout_task, *[task for _, _, task in pending_events]]
-        )
-        if winner == timeout_task:
-            break
-
-        for position, (index, event_name, event_task) in enumerate(pending_events):
-            if winner == event_task:
-                event_payloads[index] = event_task.result
-                if is_retryable_failure_event(
-                    event_task.result,
-                    descriptors[index].event_key,
-                ):
-                    pending_events[position] = (
-                        index,
-                        event_name,
-                        context.wait_for_external_event(event_name),
-                    )
-                else:
-                    pending_events.pop(position)
-                break
-        else:
-            raise RuntimeError("Durable task_any a retourné une tâche inconnue.")
-
-    if not pending_events:
-        timeout_task.cancel()
-
-    timed_out_indexes = {index for index, _, _ in pending_events}
     result = aggregate_generation_results(
         request=request,
         descriptors=descriptors,
@@ -200,9 +186,62 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
         timed_out_indexes=timed_out_indexes,
     )
     if timed_out_indexes:
-        context.continue_as_new(
-            {"terminal_result": result.model_dump(mode="json")}
+        context.continue_as_new({"terminal_result": result.model_dump(mode="json")})
+        return None
+    return result.model_dump(mode="json")
+
+
+@app.orchestration_trigger(context_name="context")
+def run_music_orchestrator(context: df.DurableOrchestrationContext):
+    orchestration_input = context.get_input()
+    if not isinstance(orchestration_input, dict):
+        raise ValueError("L’entrée d’orchestration doit être un objet JSON.")
+    terminal_result = orchestration_input.get("terminal_result")
+    if terminal_result is not None:
+        return MusicWorkflowOutput.model_validate(terminal_result).model_dump(
+            mode="json"
         )
+
+    request = CreateMusicInput.model_validate(orchestration_input["request"])
+    instance_id = context.instance_id
+
+    def build_dispatch():
+        descriptors = []
+        payloads = []
+        for index in range(len(request.tracks)):
+            event_key = f"{instance_id}:{index}:{context.new_uuid()}"
+            dts_event_name = f"music-{index}-{context.new_uuid()}"
+            descriptor, message = build_music_generation(
+                request,
+                index=index,
+                instance_id=instance_id,
+                event_key=event_key,
+                dts_event_name=dts_event_name,
+            )
+            descriptors.append(descriptor)
+            payloads.append(
+                {
+                    "index": index,
+                    "message": message.model_dump(mode="json", exclude_none=True),
+                }
+            )
+        return descriptors, payloads
+
+    descriptors, event_payloads, timed_out_indexes = yield from run_media_orchestration(
+        context,
+        timeout_seconds=int(orchestration_input["timeout_seconds"]),
+        build_dispatch=build_dispatch,
+        activity_name="enqueue_music_generation",
+    )
+
+    result = aggregate_music_results(
+        request=request,
+        descriptors=descriptors,
+        event_payloads=event_payloads,
+        timed_out_indexes=timed_out_indexes,
+    )
+    if timed_out_indexes:
+        context.continue_as_new({"terminal_result": result.model_dump(mode="json")})
         return None
     return result.model_dump(mode="json")
 
@@ -216,6 +255,22 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
 def enqueue_video_generation(job: dict, message: func.Out[str]) -> dict:
     body = VideoMessage.model_validate(job["message"])
     message.set(serialize_video_message(body))
+    return {
+        "index": job["index"],
+        "event_key": body.event_key,
+        "dts_event_name": body.dts_event_name,
+    }
+
+
+@app.activity_trigger(input_name="job")
+@app.service_bus_queue_output(
+    arg_name="message",
+    queue_name="%MUSIC_SERVICE_BUS_QUEUE_NAME%",
+    connection="ServiceBusConnection",
+)
+def enqueue_music_generation(job: dict, message: func.Out[str]) -> dict:
+    body = MusicMessage.model_validate(job["message"])
+    message.set(serialize_music_message(body))
     return {
         "index": job["index"],
         "event_key": body.event_key,
@@ -289,23 +344,73 @@ async def get_hd_video_result(
     return await _to_content_blocks(_workflow_response(status, workflow_id))
 
 
+@app.mcp_tool()
+@pydantic_mcp_tool_properties(app, CreateMusicInput)
+@app.durable_client_input(client_name="client")
+@validate_pydantic_arguments(CreateMusicInput, strict=True)
+async def create_music(
+    client: df.DurableOrchestrationClient,
+    videoid: str,
+    tracks: List[TrackSpec],
+) -> List[ContentBlock]:
+    """Démarre les générations musicales en parallèle et retourne le résultat ou un workflow_id."""
+    request = CreateMusicInput(videoid=videoid, tracks=tracks)
+    instance_id = await client.start_new(
+        "run_music_orchestrator",
+        client_input={
+            "request": request.model_dump(mode="json", exclude_none=True),
+            "timeout_seconds": ORCHESTRATION_TIMEOUT_SECONDS,
+        },
+    )
+    logging.info("Started music orchestration %s", instance_id)
+    result = await _wait_for_workflow(
+        client,
+        instance_id,
+        wait_budget_seconds=MCP_WAIT_BUDGET_SECONDS,
+        poll_interval_seconds=MCP_POLL_INTERVAL_SECONDS,
+        profile=MUSIC_PROFILE,
+    )
+    return await _to_content_blocks(result)
+
+
+@app.mcp_tool()
+@pydantic_mcp_tool_properties(app, GetMusicResultInput)
+@app.durable_client_input(client_name="client")
+@validate_pydantic_arguments(GetMusicResultInput, strict=True)
+async def get_music_result(
+    client: df.DurableOrchestrationClient,
+    workflow_id: str,
+) -> List[ContentBlock]:
+    """Retourne l'état et le résultat d'un workflow create_music."""
+    status = await client.get_status(workflow_id)
+    return await _to_content_blocks(
+        _workflow_response(status, workflow_id, profile=MUSIC_PROFILE)
+    )
+
+
 async def _wait_for_workflow(
     client: df.DurableOrchestrationClient,
     workflow_id: str,
     *,
     wait_budget_seconds: int,
     poll_interval_seconds: int,
+    profile: MediaProfile = VIDEO_PROFILE,
 ) -> BaseModel:
     deadline = time.monotonic() + wait_budget_seconds
     while time.monotonic() < deadline:
         status = await client.get_status(workflow_id)
         if status is not None and _is_terminal(status.runtime_status):
-            return _workflow_response(status, workflow_id)
+            return _workflow_response(status, workflow_id, profile=profile)
         await asyncio.sleep(poll_interval_seconds)
-    return _running_result(workflow_id)
+    return _running_result(workflow_id, profile=profile)
 
 
-def _workflow_response(status: Any, workflow_id: str) -> BaseModel:
+def _workflow_response(
+    status: Any,
+    workflow_id: str,
+    *,
+    profile: MediaProfile = VIDEO_PROFILE,
+) -> BaseModel:
     if status is None or status.runtime_status is None:
         return NotFoundWorkflowResult(
             workflow_id=workflow_id,
@@ -319,13 +424,13 @@ def _workflow_response(status: Any, workflow_id: str) -> BaseModel:
         try:
             if isinstance(output, str):
                 output = json.loads(output)
-            workflow_output = HDVideoWorkflowOutput.model_validate(output)
+            workflow_output = profile.output_model.model_validate(output)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             return FailedWorkflowResult(
                 workflow_id=instance_id,
                 error=f"Résultat d’orchestration invalide : {exc}",
             )
-        return CompletedWorkflowResult(
+        return profile.completed_model(
             workflow_id=instance_id,
             result=workflow_output,
         )
@@ -339,15 +444,19 @@ def _workflow_response(status: Any, workflow_id: str) -> BaseModel:
             else "L’orchestration Durable a échoué."
         )
         return FailedWorkflowResult(workflow_id=instance_id, error=error)
-    return _running_result(instance_id)
+    return _running_result(instance_id, profile=profile)
 
 
-def _running_result(workflow_id: str) -> RunningWorkflowResult:
+def _running_result(
+    workflow_id: str,
+    *,
+    profile: MediaProfile = VIDEO_PROFILE,
+) -> RunningWorkflowResult:
     return RunningWorkflowResult(
         workflow_id=workflow_id,
         poll_after_seconds=MCP_POLL_INTERVAL_SECONDS,
         next=(
-            f'Appelez get_hd_video_result avec workflow_id "{workflow_id}" '
+            f'Appelez {profile.result_tool} avec workflow_id "{workflow_id}" '
             f"dans environ {MCP_POLL_INTERVAL_SECONDS} secondes."
         ),
     )
@@ -370,7 +479,8 @@ async def _to_content_blocks(
     blocks: List[ContentBlock] = [
         TextContent(type="text", text=_serialize(result))
     ]
-    if not isinstance(result, CompletedWorkflowResult):
+    profile = _PROFILE_BY_COMPLETED_MODEL.get(type(result))
+    if profile is None:
         return blocks
 
     completed_generations = [
@@ -378,7 +488,7 @@ async def _to_content_blocks(
         for generation in result.result.generations
         if generation.status == "completed"
     ]
-    provider = sas_uri_provider or generate_video_sas_uris
+    provider = sas_uri_provider or generate_media_sas_uris
     try:
         sas_uris = await provider(
             [generation.blob_path for generation in completed_generations],
@@ -387,27 +497,19 @@ async def _to_content_blocks(
         )
     except AzureError:
         logging.exception(
-            "Échec de génération des SAS vidéo; retour uniquement du statut."
+            "Échec de génération des SAS média; retour uniquement du statut."
         )
         return blocks
 
     for generation in completed_generations:
         filename = generation.blob_path.rsplit("/", 1)[-1]
-        frame_description = (
-            f", {generation.num_frames} images"
-            if generation.num_frames is not None
-            else ""
-        )
         blocks.append(
             ResourceLink(
                 type="resource_link",
                 uri=sas_uris[generation.blob_path],
                 name=filename,
-                description=(
-                    f"Vidéo HD générée pour le prompt {generation.index + 1}"
-                    f"{frame_description}."
-                ),
-                mimeType="video/mp4",
+                description=profile.describe(generation),
+                mimeType=profile.mime_type,
             )
         )
     return blocks

@@ -10,16 +10,16 @@ from azure.identity.aio import DefaultAzureCredential, ManagedIdentityCredential
 from azure.storage.blob import BlobSasPermissions, generate_blob_sas
 from azure.storage.blob.aio import BlobServiceClient
 
-from video_workflow import VIDEO_BLOB_PATH_PREFIX
+from media_workflow import MEDIA_BLOB_PATH_PREFIX
 
 
 USER_DELEGATION_KEY_CLOCK_SKEW = timedelta(minutes=5)
-DEFAULT_VIDEO_SAS_TTL_SECONDS = 60 * 60
-MAX_VIDEO_SAS_TTL_SECONDS = 24 * 60 * 60
+DEFAULT_MEDIA_SAS_TTL_SECONDS = 60 * 60
+MAX_MEDIA_SAS_TTL_SECONDS = 24 * 60 * 60
 
 
 @dataclass(frozen=True)
-class VideoBlobLocation:
+class MediaBlobLocation:
     account_url: str
     account_name: str
     container_name: str
@@ -27,9 +27,9 @@ class VideoBlobLocation:
     unsigned_url: str
 
 
-def video_blob_location(blob_path: str, base_url: str) -> VideoBlobLocation:
-    if not blob_path.startswith(VIDEO_BLOB_PATH_PREFIX):
-        raise ValueError(f"Chemin blob vidéo inattendu : {blob_path!r}.")
+def media_blob_location(blob_path: str, base_url: str) -> MediaBlobLocation:
+    if not blob_path.startswith(MEDIA_BLOB_PATH_PREFIX):
+        raise ValueError(f"Chemin blob média inattendu : {blob_path!r}.")
 
     parsed = urlsplit(base_url.rstrip("/"))
     if parsed.scheme != "https" or not parsed.netloc:
@@ -40,19 +40,19 @@ def video_blob_location(blob_path: str, base_url: str) -> VideoBlobLocation:
     base_path = parsed.path.strip("/")
     if not base_path or not blob_path.startswith(f"{base_path}/"):
         raise ValueError(
-            "VIDEO_BLOB_BASE_URL et le chemin blob vidéo ne correspondent pas."
+            "VIDEO_BLOB_BASE_URL et le Chemin blob média ne correspondent pas."
         )
 
     container_name, separator, blob_name = blob_path.partition("/")
     if not separator or not blob_name:
-        raise ValueError(f"Chemin blob vidéo incomplet : {blob_path!r}.")
+        raise ValueError(f"Chemin blob média incomplet : {blob_path!r}.")
 
     relative_path = blob_path.removeprefix(f"{base_path}/")
     unsigned_url = (
         f"{parsed.scheme}://{parsed.netloc}/{quote(base_path, safe='/')}/"
         f"{quote(relative_path, safe='/')}"
     )
-    return VideoBlobLocation(
+    return MediaBlobLocation(
         account_url=f"{parsed.scheme}://{parsed.netloc}",
         account_name=parsed.netloc.split(".", 1)[0],
         container_name=container_name,
@@ -66,14 +66,14 @@ def _storage_credential():
         client_id = os.environ.get("AZURE_CLIENT_ID")
         if not client_id:
             raise RuntimeError(
-                "AZURE_CLIENT_ID est requis pour signer les vidéos avec "
+                "AZURE_CLIENT_ID est requis pour signer les médias avec "
                 "l’identité managée de la Function App."
             )
         return ManagedIdentityCredential(client_id=client_id)
     return DefaultAzureCredential()
 
 
-async def generate_video_sas_uris(
+async def generate_media_sas_uris(
     blob_paths: Sequence[str],
     *,
     base_url: str,
@@ -82,18 +82,18 @@ async def generate_video_sas_uris(
     credential_factory: Callable[[], object] = _storage_credential,
     service_client_factory: Callable[..., object] = BlobServiceClient,
 ) -> dict[str, str]:
-    if not 1 <= ttl_seconds <= MAX_VIDEO_SAS_TTL_SECONDS:
+    if not 1 <= ttl_seconds <= MAX_MEDIA_SAS_TTL_SECONDS:
         raise ValueError(
-            "La durée du SAS vidéo doit être comprise entre 1 et "
-            f"{MAX_VIDEO_SAS_TTL_SECONDS} secondes."
+            "La durée du SAS média doit être comprise entre 1 et "
+            f"{MAX_MEDIA_SAS_TTL_SECONDS} secondes."
         )
     if not blob_paths:
         return {}
 
-    locations = [video_blob_location(path, base_url) for path in blob_paths]
+    locations = [media_blob_location(path, base_url) for path in blob_paths]
     account_url = locations[0].account_url
     if any(location.account_url != account_url for location in locations):
-        raise ValueError("Toutes les vidéos doivent appartenir au même compte Blob.")
+        raise ValueError("Tous les médias doivent appartenir au même compte Blob.")
 
     issued_at = now or datetime.now(timezone.utc)
     if issued_at.tzinfo is None:

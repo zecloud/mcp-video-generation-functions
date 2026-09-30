@@ -8,6 +8,7 @@
     "ServiceBusConnection__fullyQualifiedNamespace": "servicebus.example.invalid",
     "ServiceBusConnection__credential": "managedidentity",
     "VIDEO_SERVICE_BUS_QUEUE_NAME": "video-generation",
+    "MUSIC_SERVICE_BUS_QUEUE_NAME": "music-generation",
     "VIDEO_BLOB_BASE_URL": "https://storage.example.invalid/video",
     "VIDEO_BLOB_PATH_PREFIX": "video",
     "VIDEO_SAS_TTL_SECONDS": "3600",

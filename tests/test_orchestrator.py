@@ -80,15 +80,39 @@ class FakeContext:
         self.continued_input = orchestration_input
 
 
-def orchestrator_callable():
-    function = getattr(function_app.run_hd_video_orchestrator, "_function")
+MUSIC_INPUT = {
+    "request": {
+        "videoid": "video-42",
+        "tracks": [
+            {"style": "epic orchestral", "lyrics": "[instrumental]"},
+            {
+                "style": "industrial rock",
+                "lyrics": "[verse] acier",
+                "lora": "industrial_rock",
+            },
+        ],
+    },
+    "timeout_seconds": 7200,
+}
+
+
+def durable_callable(orchestrator):
+    function = getattr(orchestrator, "_function")
     durable_wrapper = getattr(function, "_func")
     return inspect.getclosurevars(durable_wrapper).nonlocals["fn"]
 
 
-def complete_continued_orchestration(context):
+def orchestrator_callable():
+    return durable_callable(function_app.run_hd_video_orchestrator)
+
+
+def music_orchestrator_callable():
+    return durable_callable(function_app.run_music_orchestrator)
+
+
+def complete_continued_orchestration(context, orchestrator=None):
     assert context.continued_input is not None
-    continuation = orchestrator_callable()(
+    continuation = (orchestrator or orchestrator_callable())(
         FakeContext(orchestration_input=context.continued_input)
     )
     try:
@@ -218,6 +242,76 @@ def test_no_external_event_timeout_completes_through_fresh_execution():
         raise AssertionError("The timed-out execution should continue as new.")
 
     output = complete_continued_orchestration(context)
+    assert [item["status"] for item in output["generations"]] == [
+        "timeout",
+        "timeout",
+    ]
+
+
+def test_music_orchestrator_keeps_successful_dispatch_and_completes_worker_failure():
+    context = FakeContext(orchestration_input=MUSIC_INPUT)
+    generator = music_orchestrator_callable()(context)
+
+    request = next(generator)
+    assert len(request.tasks) == 3
+    request = generator.send(
+        next(task for task in request.tasks if task.name == "dispatch-0")
+    )
+    request = generator.send(
+        next(task for task in request.tasks if task.name == "dispatch-1")
+    )
+
+    first_event = next(task for task in request.tasks if task.kind == "event")
+    assert first_event.name.startswith("music-1-")
+    first_event.result = {
+        "status": "completed",
+        "event_key": "workflow-1:1:uuid-3",
+    }
+
+    try:
+        generator.send(first_event)
+    except StopIteration as completed:
+        output = completed.value
+    else:
+        raise AssertionError("The orchestration should have completed.")
+
+    assert output["videoid"] == "video-42"
+    assert [item["status"] for item in output["generations"]] == [
+        "failed",
+        "completed",
+    ]
+    assert "Service Bus" in output["generations"][0]["error"]
+    assert output["generations"][1]["prompt"] == "industrial rock (industrial_rock)"
+    assert output["generations"][1]["blob_path"].endswith(".flac")
+    assert context.timer.cancelled
+
+
+def test_music_orchestration_timeout_continues_as_new():
+    context = FakeContext(orchestration_input=MUSIC_INPUT)
+    context.dispatch_tasks = [
+        FakeTask("dispatch", "dispatch-0", "SUCCEEDED", {"index": 0}),
+        FakeTask("dispatch", "dispatch-1", "SUCCEEDED", {"index": 1}),
+    ]
+    generator = music_orchestrator_callable()(context)
+
+    request = next(generator)
+    request = generator.send(
+        next(task for task in request.tasks if task.name == "dispatch-0")
+    )
+    generator.send(
+        next(task for task in request.tasks if task.name == "dispatch-1")
+    )
+
+    try:
+        generator.send(context.timer)
+    except StopIteration as completed:
+        assert completed.value is None
+    else:
+        raise AssertionError("The timed-out execution should continue as new.")
+
+    output = complete_continued_orchestration(
+        context, orchestrator=music_orchestrator_callable()
+    )
     assert [item["status"] for item in output["generations"]] == [
         "timeout",
         "timeout",
