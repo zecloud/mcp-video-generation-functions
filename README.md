@@ -18,6 +18,46 @@ dedicated queues.
   among `two_steps_from_hell` and `industrial_rock`) and runs the same
   fan-out/fan-in orchestration on the music queue.
 - `get_music_result` mirrors `get_hd_video_result` for music workflows.
+- `create_music_video` validates `CreateMusicVideoInput` and starts one
+  "music video" generation on the video queue (`VIDEO_SERVICE_BUS_QUEUE_NAME`,
+  same ltx25 worker as `create_hd_video`). It turns a song produced by
+  `create_music` into a clip.
+- `get_music_video_result` mirrors `get_hd_video_result` for music video
+  workflows.
+
+### Music video workflow (`create_music` -> `create_music_video`)
+
+1. Generate the reference images beforehand in
+   `fluxjob/agentvideo/{videoid}/` (performer portraits, optional set/location
+   image). A single performer is enough: only `ref_speaker1_filename` and
+   `ref_speaker1_prompt` are required; `ref_speaker2..4` and
+   `background_filename` are optional, and every provided file needs its
+   prompt. Subject prompts describe the performer identity; the background
+   prompt lists the locations used by the LLM to stage the scenes.
+2. Call `create_music` with the same `videoid`; each generation result exposes
+   its `type_prefix`, such as `music-0123456789-001` (the `.flac` blob is
+   `{type_prefix}-{videoid}.flac`).
+3. Call `create_music_video` with `music_track` set to that `type_prefix`.
+   Optional inputs: `lyrics` (reference lyrics as sent to `create_music`, used to
+   correct the Whisper transcription), `theme_style`, `story`,
+   `scene_min_seconds` / `scene_max_seconds` (worker defaults 3 / 8),
+   `scene_bias` (-1..+1, default 0), `whisper_language` (auto-detected when
+   omitted), `orientation` (`Vertical` 704x1280 by default, or `Horizontal`
+   1280x704) and `reuse_music_plan`.
+4. The clip is written as `{VIDEO_BLOB_PATH_PREFIX}/{videoid}/musicvideo-{token}-001-{videoid}.mp4`.
+   The worker also writes `{music_track}-{videoid}.musicplan.json`,
+   `.scenes.srt` and `.prompts.srt` next to it. A completed response returns a
+   `video/mp4` `ResourceLink` plus SAS links to these three artifacts; the
+   JSON result exposes their paths (`artifacts`) and the `music_plan` blob name
+   reported by the worker.
+5. `reuse_music_plan=true` re-renders the clip from the existing
+   `.musicplan.json` without audio analysis nor LLM calls (for example after
+   changing the reference images or the orientation).
+
+Rendering is slow: expect about 29 minutes of GPU time per minute of song
+(~40 minutes for an 83-second song). The workflow therefore has its own
+timeout, `MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS` (4 hours by default, i.e.
+songs up to roughly 8 minutes); poll with `get_music_video_result`.
 
 All tools return `List[ContentBlock]`. The first block is a `TextContent`
 containing the JSON status contract used for polling. A completed response also
@@ -35,7 +75,8 @@ worker answers on the DTS event `music-{index}-{uuid}` with the same
 `status` / `event_key` / `error` / `retryable` contract as video.
 
 Every generation result contains its prompt/index, terminal status,
-deterministic blob path, optional `num_frames`, and any error or timeout.
+deterministic blob path and `type_prefix`, optional `num_frames` (and
+`music_plan` for music videos), and any error or timeout.
 Vertical videos are 704x1280; horizontal videos are 1280x704.
 Each queue message also carries a deterministic seed derived from its
 `event_key`, so an at-least-once activity replay produces the same video at the
@@ -96,7 +137,8 @@ SDK 2.x support requires a later Azure Functions release.
 | --- | --- |
 | `MCP_WAIT_BUDGET_SECONDS` | `20`, inline MCP wait budget |
 | `MCP_POLL_INTERVAL_SECONDS` | `5`, suggested polling delay |
-| `ORCHESTRATION_TIMEOUT_SECONDS` | `7200`, durable global timeout |
+| `ORCHESTRATION_TIMEOUT_SECONDS` | `7200`, durable global timeout for `create_hd_video` and `create_music` |
+| `MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS` | `14400`, durable timeout for `create_music_video` (~29 min of GPU per minute of song) |
 | `VIDEO_BLOB_BASE_URL` | HTTPS Blob URL prefix for generated videos |
 | `VIDEO_SAS_TTL_SECONDS` | `3600`, lifetime of read-only video SAS links; maximum 86400 |
 | `VIDEO_SERVICE_BUS_QUEUE_NAME` | Video Service Bus queue name, injected per environment |

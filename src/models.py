@@ -442,6 +442,333 @@ class MusicMessage(BaseModel):
     seed: int = Field(ge=0, le=2_147_483_647)
 
 
+DEFAULT_SCENE_MIN_SECONDS = 3.0
+DEFAULT_SCENE_MAX_SECONDS = 8.0
+MUSIC_VIDEO_OPTIONAL_TEXT_FIELDS: tuple[str, ...] = (
+    "lyrics",
+    "theme_style",
+    "story",
+    "whisper_language",
+)
+MUSIC_VIDEO_OPTIONAL_NUMBER_FIELDS: tuple[str, ...] = (
+    "scene_min_seconds",
+    "scene_max_seconds",
+    "scene_bias",
+)
+
+
+def _validate_simple_blob_name(value: str, field_name: str) -> str:
+    if "/" in value or "\\" in value or value in {".", ".."}:
+        raise ValueError(
+            f"{field_name} doit être un nom simple, sans séparateur de chemin."
+        )
+    return value
+
+
+def _validate_scene_bounds(
+    scene_min_seconds: float | None,
+    scene_max_seconds: float | None,
+) -> None:
+    effective_min = (
+        DEFAULT_SCENE_MIN_SECONDS if scene_min_seconds is None else scene_min_seconds
+    )
+    effective_max = (
+        DEFAULT_SCENE_MAX_SECONDS if scene_max_seconds is None else scene_max_seconds
+    )
+    if effective_min > effective_max:
+        raise ValueError(
+            f"scene_min_seconds ({effective_min:g}) doit être inférieur ou égal "
+            f"à scene_max_seconds ({effective_max:g}) ; valeurs par défaut du "
+            f"worker : {DEFAULT_SCENE_MIN_SECONDS:g} / {DEFAULT_SCENE_MAX_SECONDS:g}."
+        )
+
+
+class CreateMusicVideoInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    videoid: NonEmptyString = Field(
+        description=(
+            "Identifiant du dossier de travail existant, partagé avec la "
+            "musique et les images de référence."
+        )
+    )
+    music_track: NonEmptyString = Field(
+        description=(
+            "type_prefix du morceau renvoyé par create_music "
+            "(ex. « music-0123456789-001 ») ; le worker lit "
+            "{music_track}-{videoid}.flac dans le dossier de travail."
+        )
+    )
+    ref_speaker1_filename: NonEmptyString = Field(
+        description=(
+            "Nom du fichier de référence de l'interprète principal. "
+            "L'extension .png est ajoutée si elle est absente."
+        )
+    )
+    ref_speaker1_prompt: NonEmptyString = Field(
+        description=(
+            "Description visuelle de l'interprète principal "
+            "(ex. « Lena, 25 ans, cheveux platine, robe à sequins argentés »)."
+        )
+    )
+    ref_speaker2_filename: NonEmptyString | None = Field(
+        default=None,
+        description=(
+            "Nom du fichier de référence du deuxième interprète (optionnel). "
+            "L'extension .png est ajoutée si elle est absente."
+        ),
+    )
+    ref_speaker2_prompt: NonEmptyString | None = Field(
+        default=None,
+        description=(
+            "Description visuelle du deuxième interprète. "
+            "Obligatoire si ref_speaker2_filename est fourni."
+        ),
+    )
+    ref_speaker3_filename: NonEmptyString | None = Field(
+        default=None,
+        description=(
+            "Nom du fichier de référence du troisième interprète (optionnel). "
+            "L'extension .png est ajoutée si elle est absente."
+        ),
+    )
+    ref_speaker3_prompt: NonEmptyString | None = Field(
+        default=None,
+        description=(
+            "Description visuelle du troisième interprète. "
+            "Obligatoire si ref_speaker3_filename est fourni."
+        ),
+    )
+    ref_speaker4_filename: NonEmptyString | None = Field(
+        default=None,
+        description=(
+            "Nom du fichier de référence du quatrième interprète (optionnel). "
+            "L'extension .png est ajoutée si elle est absente."
+        ),
+    )
+    ref_speaker4_prompt: NonEmptyString | None = Field(
+        default=None,
+        description=(
+            "Description visuelle du quatrième interprète. "
+            "Obligatoire si ref_speaker4_filename est fourni."
+        ),
+    )
+    background_filename: NonEmptyString | None = Field(
+        default=None,
+        description=(
+            "Nom du fichier de référence du décor (optionnel). "
+            "L'extension .png est ajoutée si elle est absente."
+        ),
+    )
+    background_prompt: NonEmptyString | None = Field(
+        default=None,
+        description=(
+            "Description du ou des lieux du clip, utilisée par le LLM pour "
+            "situer les scènes. Obligatoire si background_filename est fourni."
+        ),
+    )
+    orientation: Orientation = Field(
+        default=Orientation.VERTICAL,
+        description=(
+            "Orientation du clip : Vertical produit 704x1280 et "
+            "Horizontal produit 1280x704."
+        ),
+    )
+    lyrics: NonEmptyString | None = Field(
+        default=None,
+        description=(
+            "Paroles de référence, telles qu'envoyées à create_music "
+            "(optionnel) ; elles aident à corriger la transcription Whisper."
+        ),
+    )
+    theme_style: NonEmptyString | None = Field(
+        default=None,
+        description=(
+            "Direction artistique visuelle du clip (optionnel, "
+            "ex. « néon rétro-futuriste, grain 35 mm »)."
+        ),
+    )
+    story: NonEmptyString | None = Field(
+        default=None,
+        description="Trame narrative du clip (optionnel).",
+    )
+    scene_min_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        le=60,
+        description=(
+            "Durée minimale d'une scène en secondes (optionnel, défaut worker 3)."
+        ),
+    )
+    scene_max_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        le=60,
+        description=(
+            "Durée maximale d'une scène en secondes (optionnel, défaut worker 8, "
+            "plafonnée par le worker à la taille d'un bloc de génération)."
+        ),
+    )
+    scene_bias: float | None = Field(
+        default=None,
+        ge=-1,
+        le=1,
+        description=(
+            "Biais de découpage entre -1 (scènes plus courtes) et +1 "
+            "(scènes plus longues) ; défaut worker 0."
+        ),
+    )
+    whisper_language: NonEmptyString | None = Field(
+        default=None,
+        max_length=16,
+        description=(
+            "Code langue des paroles pour Whisper (ex. « fr », « en ») ; "
+            "détection automatique si absent."
+        ),
+    )
+    reuse_music_plan: bool = Field(
+        default=False,
+        description=(
+            "Si vrai, réutilise le plan existant "
+            "{music_track}-{videoid}.musicplan.json : re-rendu du clip sans "
+            "nouvelle analyse audio ni appels LLM."
+        ),
+    )
+
+    @field_validator("orientation", mode="before")
+    @classmethod
+    def parse_orientation(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return Orientation(value)
+            except ValueError:
+                return value
+        return value
+
+    @field_validator("music_track")
+    @classmethod
+    def validate_music_track(cls, value: str) -> str:
+        return _validate_simple_blob_name(value, "music_track")
+
+    def reference_specs(self) -> list[ReferenceSpec]:
+        return [
+            ReferenceSpec(
+                file=_ensure_png_when_extensionless(getattr(self, filename_field)),
+                prompt=getattr(self, prompt_field),
+                is_background=is_background,
+            )
+            for filename_field, prompt_field, is_background in REFERENCE_FIELDS
+            if getattr(self, filename_field) is not None
+        ]
+
+    def worker_options(self) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            name: getattr(self, name)
+            for name in (
+                *MUSIC_VIDEO_OPTIONAL_TEXT_FIELDS,
+                *MUSIC_VIDEO_OPTIONAL_NUMBER_FIELDS,
+            )
+            if getattr(self, name) is not None
+        }
+        if self.reuse_music_plan:
+            options["music_plan"] = True
+        return options
+
+    @model_validator(mode="after")
+    def validate_references_and_budgets(self) -> "CreateMusicVideoInput":
+        inconsistent = []
+        for filename_field, prompt_field, _ in REFERENCE_FIELDS:
+            has_filename = getattr(self, filename_field) is not None
+            has_prompt = getattr(self, prompt_field) is not None
+            if has_filename and not has_prompt:
+                inconsistent.append(f"{filename_field} fourni sans {prompt_field}")
+            elif has_prompt and not has_filename:
+                inconsistent.append(f"{prompt_field} fourni sans {filename_field}")
+        if inconsistent:
+            raise ValueError(
+                "Références incohérentes : " + " ; ".join(inconsistent) + "."
+            )
+
+        _validate_scene_bounds(self.scene_min_seconds, self.scene_max_seconds)
+
+        request_size = len(self.model_dump_json(exclude_none=True).encode("utf-8"))
+        if request_size > DTS_INPUT_BUDGET_BYTES:
+            raise ValueError(
+                f"L’entrée DTS occupe {request_size} octets UTF-8 ; "
+                f"le budget avec marge est {DTS_INPUT_BUDGET_BYTES} octets."
+            )
+
+        message_content: dict[str, Any] = {
+            "videoid": self.videoid,
+            "music_track": self.music_track,
+            "references": [
+                reference.model_dump(mode="json")
+                for reference in self.reference_specs()
+            ],
+            **self.worker_options(),
+        }
+        user_content_size = len(
+            json.dumps(
+                message_content,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        if (
+            user_content_size
+            > SERVICE_BUS_BODY_BUDGET_BYTES - SERVICE_BUS_DYNAMIC_ENVELOPE_BUDGET_BYTES
+        ):
+            raise ValueError(
+                f"Le contenu utilisateur du message de clip occupe "
+                f"{user_content_size} octets UTF-8 ; il ne laisse pas la marge "
+                "requise pour l’enveloppe Service Bus."
+            )
+        return self
+
+
+class GetMusicVideoResultInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: NonEmptyString = Field(
+        description="Identifiant workflow_id retourné par create_music_video."
+    )
+
+
+class MusicVideoMessage(BaseModel):
+    """Message du mode « music video » du worker ltx25 (sans prompt requis)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    videoid: NonEmptyString
+    music_track: NonEmptyString
+    music_plan: Literal[True] | None = None
+    references: list[ReferenceSpec] = Field(min_length=1)
+    lyrics: NonEmptyString | None = None
+    theme_style: NonEmptyString | None = None
+    story: NonEmptyString | None = None
+    scene_min_seconds: float | None = Field(default=None, gt=0)
+    scene_max_seconds: float | None = Field(default=None, gt=0)
+    scene_bias: float | None = Field(default=None, ge=-1, le=1)
+    whisper_language: NonEmptyString | None = None
+    width: int = Field(gt=0, multiple_of=64)
+    height: int = Field(gt=0, multiple_of=64)
+    type_prefix: NonEmptyString
+    instance_id: NonEmptyString
+    event_key: NonEmptyString
+    dts_event_name: NonEmptyString
+    seed: int = Field(ge=0, le=2_147_483_647)
+
+    @field_validator("music_track")
+    @classmethod
+    def validate_music_track(cls, value: str) -> str:
+        return _validate_simple_blob_name(value, "music_track")
+
+    @model_validator(mode="after")
+    def validate_scene_bounds(self) -> "MusicVideoMessage":
+        _validate_scene_bounds(self.scene_min_seconds, self.scene_max_seconds)
+        return self
+
+
 class GenerationDescriptor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -461,7 +788,11 @@ class GenerationResult(BaseModel):
     prompt: NonEmptyString
     status: Literal["completed", "failed", "timeout"]
     blob_path: NonEmptyString
+    # Préfixe du blob ; pour create_music, valeur à passer en music_track.
+    type_prefix: str | None = None
     num_frames: int | None = Field(default=None, ge=1)
+    # Nom du blob du plan musical renvoyé par le worker en mode « music video ».
+    music_plan: str | None = None
     error: str | None = None
 
 
@@ -477,6 +808,25 @@ class MusicWorkflowOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     videoid: NonEmptyString
+    generations: list[GenerationResult]
+
+
+class MusicVideoArtifacts(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    music_plan_path: NonEmptyString
+    scenes_srt_path: NonEmptyString
+    prompts_srt_path: NonEmptyString
+
+
+class MusicVideoWorkflowOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    videoid: NonEmptyString
+    orientation: Orientation
+    music_track: NonEmptyString
+    reuse_music_plan: bool = False
+    artifacts: MusicVideoArtifacts
     generations: list[GenerationResult]
 
 
@@ -497,6 +847,12 @@ class CompletedMusicWorkflowResult(BaseModel):
     status: Literal["completed"] = "completed"
     workflow_id: NonEmptyString
     result: MusicWorkflowOutput
+
+
+class CompletedMusicVideoWorkflowResult(BaseModel):
+    status: Literal["completed"] = "completed"
+    workflow_id: NonEmptyString
+    result: MusicVideoWorkflowOutput
 
 
 class FailedWorkflowResult(BaseModel):
