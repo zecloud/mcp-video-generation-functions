@@ -67,6 +67,27 @@ from video_workflow import (
 
 app = df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
 
+# azure-functions maps McpPropertyType.FLOAT to "float", which the MCP host
+# copies verbatim into the tool JSON schema; clients (e.g. OpenAI) reject it.
+# The valid JSON Schema / MCP toolProperties type is "number".
+_MCP_PROPERTY_TYPE_FIXES = {"float": "number"}
+
+
+def mcp_tool_properties(model: type[BaseModel]) -> Callable[[Any], Any]:
+    pydantic_decorator = pydantic_mcp_tool_properties(app, model)
+
+    def decorator(function: Any) -> Any:
+        decorated = pydantic_decorator(function)
+        target = getattr(decorated, "_function", decorated)
+        target = getattr(target, "_func", target)
+        for metadata in getattr(target, "__mcp_tool_properties__", {}).values():
+            property_type = metadata.get("propertyType")
+            if property_type in _MCP_PROPERTY_TYPE_FIXES:
+                metadata["propertyType"] = _MCP_PROPERTY_TYPE_FIXES[property_type]
+        return decorated
+
+    return decorator
+
 
 def _positive_int_setting(name: str, default: int) -> int:
     raw_value = os.environ.get(name, str(default))
@@ -415,7 +436,7 @@ def enqueue_music_video_generation(job: dict, message: func.Out[str]) -> dict:
 
 
 @app.mcp_tool()
-@pydantic_mcp_tool_properties(app, CreateHDVideoInput)
+@mcp_tool_properties(CreateHDVideoInput)
 @app.durable_client_input(client_name="client")
 @validate_pydantic_arguments(CreateHDVideoInput, strict=True)
 async def create_hd_video(
@@ -468,7 +489,7 @@ async def create_hd_video(
 
 
 @app.mcp_tool()
-@pydantic_mcp_tool_properties(app, GetHDVideoResultInput)
+@mcp_tool_properties(GetHDVideoResultInput)
 @app.durable_client_input(client_name="client")
 @validate_pydantic_arguments(GetHDVideoResultInput, strict=True)
 async def get_hd_video_result(
@@ -481,7 +502,7 @@ async def get_hd_video_result(
 
 
 @app.mcp_tool()
-@pydantic_mcp_tool_properties(app, CreateMusicInput)
+@mcp_tool_properties(CreateMusicInput)
 @app.durable_client_input(client_name="client")
 @validate_pydantic_arguments(CreateMusicInput, strict=True)
 async def create_music(
@@ -510,7 +531,7 @@ async def create_music(
 
 
 @app.mcp_tool()
-@pydantic_mcp_tool_properties(app, GetMusicResultInput)
+@mcp_tool_properties(GetMusicResultInput)
 @app.durable_client_input(client_name="client")
 @validate_pydantic_arguments(GetMusicResultInput, strict=True)
 async def get_music_result(
@@ -525,7 +546,7 @@ async def get_music_result(
 
 
 @app.mcp_tool()
-@pydantic_mcp_tool_properties(app, CreateMusicVideoInput)
+@mcp_tool_properties(CreateMusicVideoInput)
 @app.durable_client_input(client_name="client")
 @validate_pydantic_arguments(CreateMusicVideoInput, strict=True)
 async def create_music_video(
@@ -595,7 +616,7 @@ async def create_music_video(
 
 
 @app.mcp_tool()
-@pydantic_mcp_tool_properties(app, GetMusicVideoResultInput)
+@mcp_tool_properties(GetMusicVideoResultInput)
 @app.durable_client_input(client_name="client")
 @validate_pydantic_arguments(GetMusicVideoResultInput, strict=True)
 async def get_music_video_result(
