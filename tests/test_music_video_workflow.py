@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import json
 
 import pytest
@@ -513,6 +514,7 @@ def test_music_video_running_result_points_to_get_music_video_result():
 # --- Enregistrement des fonctions -----------------------------------------
 
 
+@functools.cache
 def registered_bindings():
     return {
         function.get_function_name(): [
@@ -561,3 +563,18 @@ def test_music_video_tools_are_registered_alongside_existing_tools():
     }
     assert properties["reuse_music_plan"]["propertyType"] == "boolean"
     assert "prompt" not in properties
+    for name in ("scene_min_seconds", "scene_max_seconds", "scene_bias"):
+        assert properties[name]["propertyType"] == "number"
+
+
+def test_every_mcp_tool_property_uses_a_valid_json_schema_type():
+    valid_types = {"string", "number", "integer", "boolean", "object"}
+    tool_count = 0
+    for name, bindings in registered_bindings().items():
+        for binding in bindings:
+            if binding.get("type") != "mcpToolTrigger":
+                continue
+            tool_count += 1
+            for prop in json.loads(binding["toolProperties"]):
+                assert prop["propertyType"] in valid_types, (name, prop)
+    assert tool_count == 6
