@@ -192,3 +192,104 @@ def test_aggregation_preserves_completed_failed_and_timeout_results():
         type_prefix_for("instance-1", index, kind="music") for index in range(3)
     ]
     assert all(item.music_plan is None for item in result.generations)
+    assert all(item.analysis_status is None for item in result.generations)
+
+
+def _single_music_descriptor():
+    request = CreateMusicInput(
+        videoid="video-42",
+        tracks=[{"style": "pop", "lyrics": "[verse]\nla la"}],
+    )
+    descriptor = build_music_generation(
+        request,
+        index=0,
+        instance_id="instance-1",
+        event_key="key-0",
+        dts_event_name="music-0-uuid",
+    )[0]
+    return request, descriptor
+
+
+def test_aggregation_returns_completed_music_analysis():
+    request, descriptor = _single_music_descriptor()
+    name = f"{descriptor.type_prefix}-video-42.musicanalysis.json"
+
+    result = aggregate_music_results(
+        request=request,
+        descriptors=[descriptor],
+        event_payloads={
+            0: {
+                "status": "completed",
+                "event_key": "key-0",
+                "analysis_status": "completed",
+                "music_analysis": name,
+                "analysis_scenes": 12,
+                "analysis_seconds": 31.4,
+            }
+        },
+        timed_out_indexes=set(),
+    )
+
+    generation = result.generations[0]
+    assert generation.analysis_status == "completed"
+    assert generation.music_analysis == name
+    assert generation.music_analysis_path == (
+        f"{descriptor.blob_path.rsplit('/', 1)[0]}/{name}"
+    )
+    assert generation.analysis_scenes == 12
+    assert generation.analysis_error is None
+    dumped = result.model_dump(exclude_none=True)["generations"][0]
+    assert dumped["music_analysis"] == name
+
+
+def test_aggregation_returns_failed_analysis_without_failing_song():
+    request, descriptor = _single_music_descriptor()
+
+    result = aggregate_music_results(
+        request=request,
+        descriptors=[descriptor],
+        event_payloads={
+            0: {
+                "status": "completed",
+                "event_key": "key-0",
+                "analysis_status": "failed",
+                "analysis_error": "whisper unavailable",
+            }
+        },
+        timed_out_indexes=set(),
+    )
+
+    generation = result.generations[0]
+    assert generation.status == "completed"
+    assert generation.analysis_status == "failed"
+    assert generation.analysis_error == "whisper unavailable"
+    assert generation.music_analysis is None
+    assert generation.music_analysis_path is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [None, "", "dir/x.musicanalysis.json", "x.json", " x.musicanalysis.json"],
+)
+def test_aggregation_rejects_invalid_music_analysis_name(name):
+    request, descriptor = _single_music_descriptor()
+
+    result = aggregate_music_results(
+        request=request,
+        descriptors=[descriptor],
+        event_payloads={
+            0: {
+                "status": "completed",
+                "event_key": "key-0",
+                "analysis_status": "completed",
+                "music_analysis": name,
+            }
+        },
+        timed_out_indexes=set(),
+    )
+
+    generation = result.generations[0]
+    assert generation.status == "completed"
+    assert generation.analysis_status == "failed"
+    assert generation.music_analysis is None
+    assert "music_analysis" in generation.analysis_error

@@ -75,6 +75,49 @@ def is_retryable_failure_event(payload: Any, expected_event_key: str) -> bool:
     )
 
 
+ANALYSIS_STATUSES = {"completed", "failed", "skipped"}
+
+
+def analysis_fields(payload: Mapping[str, Any], blob_path: str) -> dict[str, Any]:
+    """Champs d'analyse musicale facultatifs signalés par le worker yue2."""
+    raw_status = payload.get("analysis_status")
+    if raw_status is None:
+        return {}
+    status = str(raw_status).strip().lower()
+    if status not in ANALYSIS_STATUSES:
+        return {
+            "analysis_status": "failed",
+            "analysis_error": f"Statut d'analyse inattendu : {raw_status!r}.",
+        }
+
+    fields: dict[str, Any] = {"analysis_status": status}
+    error = payload.get("analysis_error")
+    if isinstance(error, str) and error.strip():
+        fields["analysis_error"] = error.strip()
+    if status != "completed":
+        return fields
+
+    name = payload.get("music_analysis")
+    if (
+        not isinstance(name, str)
+        or not name.strip()
+        or name != name.strip()
+        or "/" in name
+        or "\\" in name
+        or not name.endswith(".musicanalysis.json")
+    ):
+        return {
+            "analysis_status": "failed",
+            "analysis_error": "Nom de blob music_analysis invalide ou absent.",
+        }
+    fields["music_analysis"] = name
+    fields["music_analysis_path"] = f"{blob_path.rsplit('/', 1)[0]}/{name}"
+    scenes = payload.get("analysis_scenes")
+    if isinstance(scenes, int) and not isinstance(scenes, bool) and scenes >= 0:
+        fields["analysis_scenes"] = scenes
+    return fields
+
+
 def aggregate_results(
     *,
     descriptors: Sequence[GenerationDescriptor],
@@ -119,6 +162,7 @@ def aggregate_results(
                             if isinstance(music_plan, str) and music_plan.strip()
                             else None
                         ),
+                        **analysis_fields(payload, descriptor.blob_path),
                     )
                 )
             else:
