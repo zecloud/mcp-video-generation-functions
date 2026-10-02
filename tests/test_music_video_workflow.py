@@ -306,7 +306,10 @@ def test_vertical_message_uses_704x1280_and_reuse_sends_music_plan_true():
 
 def test_explicit_music_plan_is_uploaded_and_sent_as_the_simple_blob_name():
     request = make_request(music_plan=make_plan(), backgrounds=BACKGROUNDS)
-    expected_name = f"{TRACK}-video-42.musicplan.json"
+    expected_name = (
+        f"{TRACK}-video-42-"
+        "0fa341946645976c.musicplan.json"
+    )
 
     assert request.music_plan_blob_name() == expected_name
     assert request.worker_options() == {"music_plan": expected_name}
@@ -378,6 +381,13 @@ def test_plan_scenes_must_be_contiguous_and_on_the_frame_grid():
         make_plan_model(scenes=[SCENES[0], {**SCENES[1], "start": 2.5}])
     with pytest.raises(ValidationError, match="ordonnées"):
         make_plan_model(scenes=[SCENES[1], SCENES[0]])
+    with pytest.raises(ValidationError, match="sa durée"):
+        make_plan_model(
+            scenes=[
+                {**SCENES[0], "frames": 73},
+                {**SCENES[1], "frames": 49},
+            ],
+        )
 
 
 def test_plan_scenes_must_cover_the_full_duration():
@@ -521,7 +531,8 @@ def test_music_plan_upload_targets_the_working_folder_and_returns_the_blob_name(
         function_app._upload_music_plan(request, uploader=fake_uploader)
     )
 
-    assert blob_name == f"{TRACK}-video-42.musicplan.json"
+    assert blob_name.endswith(".musicplan.json")
+    assert blob_name.startswith(f"{TRACK}-video-42-")
     blob_path, content, base_url, content_type = calls[0]
     assert blob_path == f"video/video-42/{blob_name}"
     assert base_url == function_app.VIDEO_BLOB_BASE_URL
@@ -530,6 +541,15 @@ def test_music_plan_upload_targets_the_working_folder_and_returns_the_blob_name(
     assert uploaded["schema_version"] == 1
     assert uploaded["locations"] == ["Neon street", "Rooftop"]
     assert len(uploaded["scenes"]) == 2
+
+
+def test_music_plan_blob_name_rejects_path_separators_before_upload():
+    with pytest.raises(ValidationError, match="music_plan"):
+        make_request(
+            videoid="nested/video-42",
+            music_plan=make_plan(videoid="nested/video-42"),
+            backgrounds=BACKGROUNDS,
+        )
 
 
 def test_music_plan_upload_requires_a_plan():

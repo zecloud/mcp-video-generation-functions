@@ -57,13 +57,16 @@ dedicated queues.
    `.musicplan.json` without audio analysis nor LLM calls (for example after
    changing the reference images or the orientation). It is reserved for
    re-renders and is mutually exclusive with `music_plan`.
-6. `music_plan` takes a **pre-computed MusicPlan v1 JSON object** (not a blob
-   name, not a JSON string). The MCP server validates it, serializes it and
+6. `music_plan` takes a **pre-computed MusicPlan v1 JSON object**. The MCP
+   transport also accepts that object JSON-encoded as a string; both forms are
+   decoded and validated identically (a blob name is never accepted). The MCP
+   server validates it, serializes it and
    uploads it to
-   `{VIDEO_BLOB_PATH_PREFIX}/{videoid}/{music_track}-{videoid}.musicplan.json`
-   before starting the orchestration, then sends the worker only the simple
-   blob name `{music_track}-{videoid}.musicplan.json`. The plan therefore never
-   transits through the Durable Task input nor the Service Bus message.
+   `{VIDEO_BLOB_PATH_PREFIX}/{videoid}/{music_track}-{videoid}-<plan-hash>.musicplan.json`
+   before starting the orchestration, then sends the worker only that simple
+   blob name. The content hash makes concurrent requests with different plans
+   immutable and collision-free; the plan therefore never transits through the
+   Durable Task input nor the Service Bus message.
    Validation covers `schema_version=1`, `videoid` / `music_track` matching the
    call, contiguous scenes indexed from 0, scene `frames` and `total_frames` on
    the LTX `8k+1` grid with `total_frames == 1 + sum(frames - 1)`, and each

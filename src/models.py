@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import hashlib
 import json
 import math
 from pathlib import PurePath
@@ -624,6 +625,17 @@ class MusicPlan(BaseModel):
             )
 
         for scene in self.scenes:
+            scene_duration = scene.end - scene.start
+            target_frames = max(9, math.ceil(scene_duration * self.fps) + 1)
+            expected_frames = 1 + MUSIC_PLAN_FRAME_GRID * math.ceil(
+                (target_frames - 1) / MUSIC_PLAN_FRAME_GRID
+            )
+            if scene.frames != expected_frames:
+                raise ValueError(
+                    f"music_plan.scenes[{scene.index}].frames ({scene.frames}) "
+                    f"ne correspond pas à sa durée ({scene_duration:g} s) à "
+                    f"{self.fps} fps ; la grille 8k+1 exige {expected_frames}."
+                )
             self._scene_location(scene)
         return self
 
@@ -877,7 +889,15 @@ class CreateMusicVideoInput(BaseModel):
         return []
 
     def music_plan_blob_name(self) -> str:
-        return music_plan_blob_name(self.videoid, self.music_track)
+        name = music_plan_blob_name(self.videoid, self.music_track)
+        if self.music_plan is None:
+            return name
+        digest = hashlib.sha256(self.music_plan.serialize()).hexdigest()[:16]
+        base = name.removesuffix(f".{MUSIC_PLAN_SUFFIX}")
+        return _validate_simple_blob_name(
+            f"{base}-{digest}.{MUSIC_PLAN_SUFFIX}",
+            "music_plan",
+        )
 
     def reference_specs(self) -> list[ReferenceSpec]:
         specs = [
@@ -952,6 +972,7 @@ class CreateMusicVideoInput(BaseModel):
         backgrounds = self.background_specs()
         if self.music_plan is not None:
             plan = self.music_plan
+            self.music_plan_blob_name()
             if plan.videoid != self.videoid:
                 raise ValueError(
                     f"music_plan.videoid ({plan.videoid!r}) doit valoir "
