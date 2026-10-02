@@ -7,7 +7,7 @@ from typing import Awaitable, Callable, Sequence
 from urllib.parse import quote, urlsplit
 
 from azure.identity.aio import DefaultAzureCredential, ManagedIdentityCredential
-from azure.storage.blob import BlobSasPermissions, generate_blob_sas
+from azure.storage.blob import BlobSasPermissions, ContentSettings, generate_blob_sas
 from azure.storage.blob.aio import BlobServiceClient
 
 from media_workflow import MEDIA_BLOB_PATH_PREFIX
@@ -71,6 +71,48 @@ def _storage_credential():
             )
         return ManagedIdentityCredential(client_id=client_id)
     return DefaultAzureCredential()
+
+
+async def _close_credential(credential: object) -> None:
+    close = getattr(credential, "close", None)
+    if close is None:
+        return
+    closed = close()
+    if isinstance(closed, Awaitable):
+        await closed
+
+
+async def upload_media_blob(
+    blob_path: str,
+    content: bytes,
+    *,
+    base_url: str,
+    content_type: str = "application/octet-stream",
+    overwrite: bool = True,
+    credential_factory: Callable[[], object] = _storage_credential,
+    service_client_factory: Callable[..., object] = BlobServiceClient,
+) -> str:
+    """Upload un artefact dans le dossier de travail média et rend son URL."""
+
+    location = media_blob_location(blob_path, base_url)
+    credential = credential_factory()
+    try:
+        async with service_client_factory(
+            account_url=location.account_url,
+            credential=credential,
+        ) as blob_service_client:
+            blob_client = blob_service_client.get_blob_client(
+                container=location.container_name,
+                blob=location.blob_name,
+            )
+            await blob_client.upload_blob(
+                content,
+                overwrite=overwrite,
+                content_settings=ContentSettings(content_type=content_type),
+            )
+    finally:
+        await _close_credential(credential)
+    return location.unsigned_url
 
 
 async def generate_media_sas_uris(

@@ -20,12 +20,14 @@ from models import (
     CompletedMusicVideoWorkflowResult,
     CreateMusicVideoInput,
     DTS_INPUT_BUDGET_BYTES,
+    MusicPlan,
     MusicVideoMessage,
     SERVICE_BUS_BODY_BUDGET_BYTES,
 )
 from music_video_workflow import (
     aggregate_music_video_results,
     build_music_video_generation,
+    music_plan_blob_path,
     music_video_artifacts,
     output_blob_path,
     serialize_music_video_message,
@@ -39,6 +41,58 @@ from test_orchestrator import (
 )
 
 TRACK = "music-0123456789-001"
+BACKGROUNDS = [
+    {"filename": "street", "description": "Neon street"},
+    {"filename": "roof", "description": "Rooftop"},
+]
+SCENES = [
+    {
+        "index": 0,
+        "start": 0,
+        "end": 2.0,
+        "frames": 49,
+        "lyrics": "néons",
+        "instrumental": False,
+        "prompt": "Neon street: The singer walks while the camera tracks left.",
+    },
+    {
+        "index": 1,
+        "start": 2.0,
+        "end": 5.0,
+        "frames": 73,
+        "lyrics": "la nuit",
+        "instrumental": False,
+        "prompt": "Rooftop: The singer looks up while the camera rises.",
+    },
+]
+SINGLE_SCENE = {
+    "index": 0,
+    "start": 0,
+    "end": 5.0,
+    "frames": 121,
+    "instrumental": True,
+    "prompt": "Neon street: The camera drifts along the wet pavement.",
+}
+
+
+def make_plan(**overrides):
+    plan = {
+        "schema_version": 1,
+        "videoid": "video-42",
+        "music_track": TRACK,
+        "fps": 24,
+        "duration_seconds": 5.0,
+        "total_frames": 121,
+        "subject": "Image 1: the singer",
+        "locations": ["Neon street", "Rooftop"],
+        "scenes": SCENES,
+    }
+    plan.update(overrides)
+    return plan
+
+
+def make_plan_model(**overrides):
+    return MusicPlan.model_validate(make_plan(**overrides))
 
 
 def make_request(**overrides):
@@ -69,6 +123,7 @@ def test_single_performer_is_enough_and_defaults_to_vertical():
 
     assert request.orientation.value == "Vertical"
     assert request.reuse_music_plan is False
+    assert request.music_plan is None
     assert [spec.model_dump() for spec in request.reference_specs()] == [
         {
             "file": "lena.png",
@@ -247,6 +302,276 @@ def test_vertical_message_uses_704x1280_and_reuse_sends_music_plan_true():
     body = json.loads(serialize_music_video_message(message))
     assert (body["width"], body["height"]) == (704, 1280)
     assert body["music_plan"] is True
+
+
+def test_explicit_music_plan_is_uploaded_and_sent_as_the_simple_blob_name():
+    request = make_request(music_plan=make_plan(), backgrounds=BACKGROUNDS)
+    expected_name = (
+        f"{TRACK}-video-42-"
+        "0fa341946645976c.musicplan.json"
+    )
+
+    assert request.music_plan_blob_name() == expected_name
+    assert request.worker_options() == {"music_plan": expected_name}
+    assert music_plan_blob_path(request) == f"video/video-42/{expected_name}"
+
+    _, message = build(request)
+    body = json.loads(serialize_music_video_message(message))
+    assert body["music_plan"] == expected_name
+    # Le plan lui-même ne transite ni par Service Bus ni par DTS.
+    assert "locations" not in body and "scenes" not in body
+    assert "music_plan" not in json.loads(
+        request.model_dump_json(exclude_none=True, exclude={"music_plan"})
+    )
+
+
+def test_music_plan_accepts_the_json_string_form_and_serializes_back():
+    plan = make_plan()
+    request = make_request(
+        music_plan=json.dumps(plan), backgrounds=json.dumps(BACKGROUNDS)
+    )
+
+    assert request.music_plan == MusicPlan.model_validate(plan)
+    assert json.loads(request.music_plan.serialize())["total_frames"] == 121
+
+
+def test_music_plan_blob_name_survives_the_dts_round_trip():
+    request = make_request(music_plan=make_plan(), backgrounds=BACKGROUNDS)
+    blob_name = request.music_plan_blob_name()
+    # Ce que le client Durable envoie réellement à l'orchestrateur.
+    replayed = CreateMusicVideoInput.model_validate(
+        request.model_dump(mode="json", exclude_none=True, exclude={"music_plan"})
+    )
+
+    assert replayed.music_plan is None
+    _, message = build_music_video_generation(
+        replayed,
+        instance_id="instance-1",
+        event_key="event-key-0",
+        dts_event_name="music-video-0-uuid",
+        music_plan_blob=blob_name,
+    )
+    assert json.loads(serialize_music_video_message(message))["music_plan"] == blob_name
+
+
+@pytest.mark.parametrize(
+    "mutation, message",
+    [
+        ({"schema_version": 2}, "schema_version"),
+        ({"videoid": "autre"}, "music_plan.videoid"),
+        ({"music_track": "music-autre"}, "music_plan.music_track"),
+        ({"total_frames": 999}, "total_frames"),
+        ({"locations": ["Neon street", "Neon street"]}, "doublons"),
+    ],
+)
+def test_invalid_music_plans_are_rejected(mutation, message):
+    with pytest.raises(ValidationError, match=message):
+        make_request(music_plan=make_plan(**mutation), backgrounds=BACKGROUNDS)
+
+
+def test_plan_scenes_must_be_contiguous_and_on_the_frame_grid():
+    with pytest.raises(ValidationError, match="grille 8k"):
+        make_plan_model(scenes=[{**SCENES[0], "frames": 50}, SCENES[1]])
+    with pytest.raises(ValidationError, match="supérieur ou égal à 9"):
+        make_plan_model(
+            total_frames=113,
+            scenes=[{**SCENES[0], "frames": 1}, SCENES[1]],
+        )
+    with pytest.raises(ValidationError, match="prolonge pas"):
+        make_plan_model(scenes=[SCENES[0], {**SCENES[1], "start": 2.5}])
+    with pytest.raises(ValidationError, match="ordonnées"):
+        make_plan_model(scenes=[SCENES[1], SCENES[0]])
+    with pytest.raises(ValidationError, match="sa durée"):
+        make_plan_model(
+            scenes=[
+                {**SCENES[0], "frames": 73},
+                {**SCENES[1], "frames": 49},
+            ],
+        )
+
+
+def test_scene_frame_count_keeps_an_existing_8k_plus_1_boundary():
+    scene = {
+        **SINGLE_SCENE,
+        "end": 49 / 24,
+        "frames": 49,
+    }
+
+    plan = make_plan_model(
+        duration_seconds=49 / 24,
+        total_frames=49,
+        locations=["Neon street"],
+        scenes=[scene],
+    )
+
+    assert plan.scenes[0].frames == 49
+
+
+def test_plan_scenes_must_cover_the_full_duration():
+    with pytest.raises(ValidationError, match="se terminent à 4"):
+        make_plan_model(scenes=[SCENES[0], {**SCENES[1], "end": 4.0}])
+
+
+def test_plan_total_frames_must_match_duration_and_fps():
+    scenes = [
+        {**SCENES[0], "frames": 65},
+        {**SCENES[1], "frames": 65},
+    ]
+    with pytest.raises(ValidationError, match="la grille 8k\\+1 exige 121"):
+        make_plan_model(total_frames=129, scenes=scenes)
+
+
+def test_plan_duration_must_be_finite():
+    with pytest.raises(ValidationError, match="duration_seconds doit être fini"):
+        make_plan_model(duration_seconds=float("inf"))
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "The singer walks under the neon lights.",
+        "Unknown place: The singer walks.",
+        "Neon street:",
+        "Neon street: ",
+    ],
+)
+def test_each_scene_prompt_must_match_exactly_one_location(prompt):
+    with pytest.raises(ValidationError, match="exactement un décor"):
+        make_plan_model(scenes=[{**SCENES[0], "prompt": prompt}, SCENES[1]])
+
+
+def test_ambiguous_location_prefixes_are_rejected():
+    with pytest.raises(ValidationError, match="exactement un décor"):
+        make_plan_model(
+            locations=["Neon street", "Neon street: the alley"],
+            scenes=[
+                {**SCENES[0], "prompt": "Neon street: the alley: The singer walks."},
+                {**SCENES[1], "prompt": "Neon street: the alley: The camera rises."},
+            ],
+        )
+
+
+def test_plan_scene_locations_are_exposed_in_order():
+    assert make_plan_model().scene_locations() == ["Neon street", "Rooftop"]
+
+
+def test_backgrounds_must_match_plan_locations_one_per_place():
+    with pytest.raises(ValidationError, match="1 décor"):
+        make_request(music_plan=make_plan(), backgrounds=BACKGROUNDS[:1])
+    with pytest.raises(ValidationError, match="Décors incohérents"):
+        make_request(
+            music_plan=make_plan(),
+            backgrounds=[
+                BACKGROUNDS[0],
+                {"filename": "roof", "description": "Autre toit"},
+            ],
+        )
+
+
+def test_backgrounds_become_ordered_background_references():
+    request = make_request(music_plan=make_plan(), backgrounds=BACKGROUNDS)
+
+    assert [spec.model_dump() for spec in request.reference_specs()] == [
+        {
+            "file": "lena.png",
+            "prompt": "Lena, 25 ans, cheveux platine",
+            "is_background": False,
+        },
+        {"file": "street.png", "prompt": "Neon street", "is_background": True},
+        {"file": "roof.png", "prompt": "Rooftop", "is_background": True},
+    ]
+
+
+def test_legacy_single_background_is_normalized_to_a_one_item_list():
+    request = make_request(
+        background_filename="street",
+        background_prompt="Neon street",
+        music_plan=make_plan(locations=["Neon street"], scenes=[SINGLE_SCENE]),
+    )
+
+    assert [spec.model_dump() for spec in request.background_specs()] == [
+        {"filename": "street", "description": "Neon street"}
+    ]
+    assert request.reference_specs()[-1].model_dump() == {
+        "file": "street.png",
+        "prompt": "Neon street",
+        "is_background": True,
+    }
+
+
+def test_legacy_background_fields_cannot_be_mixed_with_backgrounds():
+    with pytest.raises(ValidationError, match="mutuellement exclusifs"):
+        make_request(
+            background_filename="street",
+            background_prompt="Neon street",
+            backgrounds=BACKGROUNDS,
+        )
+
+
+def test_music_plan_and_reuse_music_plan_together_are_rejected():
+    with pytest.raises(ValidationError, match="mutuellement exclusifs"):
+        make_request(
+            music_plan=make_plan(), backgrounds=BACKGROUNDS, reuse_music_plan=True
+        )
+    with pytest.raises(ValueError, match="mutuellement exclusifs"):
+        build_music_video_generation(
+            make_request(reuse_music_plan=True),
+            instance_id="instance-1",
+            event_key="event-key-0",
+            dts_event_name="music-video-0-uuid",
+            music_plan_blob=f"{TRACK}-video-42.musicplan.json",
+        )
+
+
+@pytest.mark.parametrize(
+    "plan", ["dossier/plan.musicplan.json", "dossier\\plan.musicplan.json", ".."]
+)
+def test_worker_music_plan_must_be_a_simple_blob_name(plan):
+    with pytest.raises(ValidationError, match="music_plan"):
+        MusicVideoMessage.model_validate(
+            {
+                **build()[1].model_dump(mode="json", exclude_none=True),
+                "music_plan": plan,
+            }
+        )
+
+
+def test_music_plan_upload_targets_the_working_folder_and_returns_the_blob_name():
+    request = make_request(music_plan=make_plan(), backgrounds=BACKGROUNDS)
+    calls = []
+
+    async def fake_uploader(blob_path, content, *, base_url, content_type):
+        calls.append((blob_path, content, base_url, content_type))
+        return f"{base_url}/uploaded"
+
+    blob_name = asyncio.run(
+        function_app._upload_music_plan(request, uploader=fake_uploader)
+    )
+
+    assert blob_name.endswith(".musicplan.json")
+    assert blob_name.startswith(f"{TRACK}-video-42-")
+    blob_path, content, base_url, content_type = calls[0]
+    assert blob_path == f"video/video-42/{blob_name}"
+    assert base_url == function_app.VIDEO_BLOB_BASE_URL
+    assert content_type == "application/json"
+    uploaded = json.loads(content)
+    assert uploaded["schema_version"] == 1
+    assert uploaded["locations"] == ["Neon street", "Rooftop"]
+    assert len(uploaded["scenes"]) == 2
+
+
+def test_music_plan_blob_name_rejects_path_separators_before_upload():
+    with pytest.raises(ValidationError, match="music_plan"):
+        make_request(
+            videoid="nested/video-42",
+            music_plan=make_plan(videoid="nested/video-42"),
+            backgrounds=BACKGROUNDS,
+        )
+
+
+def test_music_plan_upload_requires_a_plan():
+    with pytest.raises(ValueError, match="Aucun music_plan"):
+        asyncio.run(function_app._upload_music_plan(make_request()))
 
 
 def test_message_rejects_prompt_dimensions_and_missing_references():
@@ -562,6 +887,8 @@ def test_music_video_tools_are_registered_alongside_existing_tools():
         "ref_speaker1_prompt",
     }
     assert properties["reuse_music_plan"]["propertyType"] == "boolean"
+    assert properties["music_plan"]["propertyType"] == "object"
+    assert properties["backgrounds"]["propertyType"] in {"object", "string"}
     assert "prompt" not in properties
     for name in ("scene_min_seconds", "scene_max_seconds", "scene_bias"):
         assert properties[name]["propertyType"] == "number"
