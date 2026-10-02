@@ -273,6 +273,38 @@ def test_completed_music_result_returns_audio_resource_link():
     )
 
 
+def test_completed_music_result_returns_analysis_link_and_fields():
+    output = music_workflow_output()
+    output["generations"][0].update(
+        {
+            "analysis_status": "completed",
+            "music_analysis": "music-001-video-42.musicanalysis.json",
+            "music_analysis_path": (
+                "video/video-42/music-001-video-42.musicanalysis.json"
+            ),
+            "analysis_scenes": 12,
+        }
+    )
+    result = _workflow_response(
+        DurableStatus(RuntimeStatus("Completed"), "workflow-1", output),
+        "workflow-1",
+        profile=MUSIC_PROFILE,
+    )
+
+    blocks = asyncio.run(
+        _to_content_blocks(result, sas_uri_provider=fake_sas_uri_provider)
+    )
+
+    payload = json.loads(blocks[0].text)
+    generation = payload["result"]["generations"][0]
+    assert generation["music_analysis"] == "music-001-video-42.musicanalysis.json"
+    assert generation["analysis_scenes"] == 12
+    assert [(block.name, block.mimeType) for block in blocks[1:]] == [
+        ("music-001-video-42.flac", "audio/flac"),
+        ("music-001-video-42.musicanalysis.json", "application/json"),
+    ]
+
+
 def test_music_running_result_points_to_get_music_result():
     result = _running_result("workflow-1", profile=MUSIC_PROFILE)
 

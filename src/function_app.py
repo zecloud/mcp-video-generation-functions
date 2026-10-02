@@ -226,6 +226,23 @@ def _music_video_artifact_links(output: BaseModel) -> list[ExtraResourceLink]:
     ]
 
 
+def _music_analysis_links(output: BaseModel) -> list[ExtraResourceLink]:
+    if not isinstance(output, MusicWorkflowOutput):
+        return []
+    return [
+        ExtraResourceLink(
+            blob_path=generation.music_analysis_path,
+            description=(
+                "Analyse musicale (MusicAnalysis : scènes, paroles, "
+                "instrumentaux) à transformer en music_plan."
+            ),
+            mime_type="application/json",
+        )
+        for generation in output.generations
+        if generation.status == "completed" and generation.music_analysis_path
+    ]
+
+
 VIDEO_PROFILE = MediaProfile(
     output_model=HDVideoWorkflowOutput,
     completed_model=CompletedWorkflowResult,
@@ -239,6 +256,7 @@ MUSIC_PROFILE = MediaProfile(
     result_tool="get_music_result",
     mime_type="audio/flac",
     describe=_describe_music,
+    extra_links=_music_analysis_links,
 )
 MUSIC_VIDEO_PROFILE = MediaProfile(
     output_model=MusicVideoWorkflowOutput,

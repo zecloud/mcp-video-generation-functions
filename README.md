@@ -100,6 +100,12 @@ worker answers on the DTS event `music-{index}-{uuid}` with the same
 Every generation result contains its prompt/index, terminal status,
 deterministic blob path and `type_prefix`, optional `num_frames` (and
 `music_plan` for music videos), and any error or timeout.
+Music results also relay the yue2 analysis fields when present:
+`analysis_status` (`completed` / `failed` / `skipped`), `music_analysis`
+(simple `{type_prefix}-{videoid}.musicanalysis.json` blob name),
+`music_analysis_path`, `analysis_scenes` and `analysis_error`. A completed
+analysis adds an `application/json` `ResourceLink` with a SAS URL. An analysis
+failure never fails the song generation itself.
 Vertical videos are 704x1280; horizontal videos are 1280x704.
 Each queue message also carries a deterministic seed derived from its
 `event_key`, so an at-least-once activity replay produces the same video at the

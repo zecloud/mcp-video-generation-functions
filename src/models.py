@@ -1119,6 +1119,12 @@ class GenerationResult(BaseModel):
     num_frames: int | None = Field(default=None, ge=1)
     # Nom du blob du plan musical renvoyé par le worker en mode « music video ».
     music_plan: str | None = None
+    # Analyse MusicAnalysis produite par yue2 après create_music (best effort).
+    analysis_status: Literal["completed", "failed", "skipped"] | None = None
+    music_analysis: str | None = None
+    music_analysis_path: str | None = None
+    analysis_scenes: int | None = Field(default=None, ge=0)
+    analysis_error: str | None = None
     error: str | None = None
 
 
