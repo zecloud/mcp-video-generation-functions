@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from enum import Enum
 import json
+import math
 from pathlib import PurePath
 from typing import Annotated, Any, List, Literal
 
@@ -523,15 +524,19 @@ class MusicPlanScene(BaseModel):
 
     @model_validator(mode="after")
     def validate_scene(self) -> "MusicPlanScene":
+        if not (math.isfinite(self.start) and math.isfinite(self.end)):
+            raise ValueError(
+                f"scenes[{self.index}] : start et end doivent être finis."
+            )
         if self.end <= self.start:
             raise ValueError(
                 f"scenes[{self.index}] : end ({self.end:g}) doit être "
                 f"strictement supérieur à start ({self.start:g})."
             )
-        if (self.frames - 1) % MUSIC_PLAN_FRAME_GRID != 0:
+        if self.frames < 9 or (self.frames - 1) % MUSIC_PLAN_FRAME_GRID != 0:
             raise ValueError(
                 f"scenes[{self.index}] : frames ({self.frames}) doit être sur "
-                f"la grille 8k+1 du worker LTX."
+                f"la grille 8k+1 du worker LTX et supérieur ou égal à 9."
             )
         return self
 
@@ -570,6 +575,8 @@ class MusicPlan(BaseModel):
 
     @model_validator(mode="after")
     def validate_plan(self) -> "MusicPlan":
+        if not math.isfinite(self.duration_seconds):
+            raise ValueError("music_plan.duration_seconds doit être fini.")
         if len(set(self.locations)) != len(self.locations):
             raise ValueError("music_plan.locations contient des doublons.")
 
@@ -588,17 +595,27 @@ class MusicPlan(BaseModel):
                 )
             previous_end = scene.end
 
-        if previous_end - self.duration_seconds > 1e-3:
+        if abs(previous_end - self.duration_seconds) > 1e-3:
             raise ValueError(
-                f"music_plan : les scènes couvrent {previous_end:g} s au-delà de "
-                f"duration_seconds ({self.duration_seconds:g})."
+                f"music_plan : les scènes se terminent à {previous_end:g} s ; "
+                f"duration_seconds vaut {self.duration_seconds:g}."
             )
 
-        expected_total = 1 + sum(scene.frames - 1 for scene in self.scenes)
-        if self.total_frames != expected_total:
+        covered_total = 1 + sum(scene.frames - 1 for scene in self.scenes)
+        if self.total_frames != covered_total:
             raise ValueError(
                 f"music_plan.total_frames ({self.total_frames}) doit valoir "
-                f"1 + somme(frames - 1) = {expected_total}."
+                f"1 + somme(frames - 1) = {covered_total}."
+            )
+        target_frames = max(9, math.ceil(self.duration_seconds * self.fps))
+        expected_total = 1 + MUSIC_PLAN_FRAME_GRID * math.ceil(
+            (target_frames - 1) / MUSIC_PLAN_FRAME_GRID
+        )
+        if self.total_frames != expected_total:
+            raise ValueError(
+                f"music_plan.total_frames ({self.total_frames}) ne correspond pas "
+                f"à {self.duration_seconds:g} s à {self.fps} fps ; "
+                f"la grille 8k+1 exige {expected_total}."
             )
         if (self.total_frames - 1) % MUSIC_PLAN_FRAME_GRID != 0:
             raise ValueError(

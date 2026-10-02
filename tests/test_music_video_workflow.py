@@ -369,10 +369,34 @@ def test_invalid_music_plans_are_rejected(mutation, message):
 def test_plan_scenes_must_be_contiguous_and_on_the_frame_grid():
     with pytest.raises(ValidationError, match="grille 8k"):
         make_plan_model(scenes=[{**SCENES[0], "frames": 50}, SCENES[1]])
+    with pytest.raises(ValidationError, match="supérieur ou égal à 9"):
+        make_plan_model(
+            total_frames=113,
+            scenes=[{**SCENES[0], "frames": 1}, SCENES[1]],
+        )
     with pytest.raises(ValidationError, match="prolonge pas"):
         make_plan_model(scenes=[SCENES[0], {**SCENES[1], "start": 2.5}])
     with pytest.raises(ValidationError, match="ordonnées"):
         make_plan_model(scenes=[SCENES[1], SCENES[0]])
+
+
+def test_plan_scenes_must_cover_the_full_duration():
+    with pytest.raises(ValidationError, match="se terminent à 4"):
+        make_plan_model(scenes=[SCENES[0], {**SCENES[1], "end": 4.0}])
+
+
+def test_plan_total_frames_must_match_duration_and_fps():
+    scenes = [
+        {**SCENES[0], "frames": 65},
+        {**SCENES[1], "frames": 65},
+    ]
+    with pytest.raises(ValidationError, match="la grille 8k\\+1 exige 121"):
+        make_plan_model(total_frames=129, scenes=scenes)
+
+
+def test_plan_duration_must_be_finite():
+    with pytest.raises(ValidationError, match="duration_seconds doit être fini"):
+        make_plan_model(duration_seconds=float("inf"))
 
 
 @pytest.mark.parametrize(
