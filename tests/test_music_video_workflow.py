@@ -325,16 +325,14 @@ def test_explicit_music_plan_is_uploaded_and_sent_as_the_simple_blob_name():
     )
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("music_plan", json.dumps(make_plan())),
-        ("backgrounds", json.dumps(BACKGROUNDS)),
-    ],
-)
-def test_music_plan_and_backgrounds_require_json_values(field, value):
-    with pytest.raises(ValidationError):
-        make_request(**{field: value})
+def test_music_plan_accepts_the_json_string_form_and_serializes_back():
+    plan = make_plan()
+    request = make_request(
+        music_plan=json.dumps(plan), backgrounds=json.dumps(BACKGROUNDS)
+    )
+
+    assert request.music_plan == MusicPlan.model_validate(plan)
+    assert json.loads(request.music_plan.serialize())["total_frames"] == 121
 
 
 def test_music_plan_blob_name_survives_the_dts_round_trip():

@@ -854,6 +854,11 @@ class CreateMusicVideoInput(BaseModel):
         ),
     )
 
+    @field_validator("music_plan", "backgrounds", mode="before")
+    @classmethod
+    def decode_json_payloads(cls, value: Any) -> Any:
+        return _decode_json_object(value)
+
     @field_validator("orientation", mode="before")
     @classmethod
     def parse_orientation(cls, value: Any) -> Any:

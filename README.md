@@ -57,10 +57,11 @@ dedicated queues.
    `.musicplan.json` without audio analysis nor LLM calls (for example after
    changing the reference images or the orientation). It is reserved for
    re-renders and is mutually exclusive with `music_plan`.
-6. `music_plan` takes a **pre-computed MusicPlan v1 JSON object**; JSON strings
-   and blob names are not accepted. Likewise, `backgrounds` must be a JSON
-   array of `{filename, description}` objects. The MCP server validates the
-   plan, serializes it and
+6. `music_plan` takes a **pre-computed MusicPlan v1 JSON object**. The MCP
+   transport also accepts that object and the `backgrounds` array JSON-encoded
+   as strings; native JSON values and their string forms are decoded and
+   validated identically (a blob name is never accepted). The MCP server
+   validates the plan, serializes it and
    uploads it to
    `{VIDEO_BLOB_PATH_PREFIX}/{videoid}/{music_track}-{videoid}-<plan-hash>.musicplan.json`
    before starting the orchestration, then sends the worker only that simple
