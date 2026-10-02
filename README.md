@@ -28,12 +28,15 @@ dedicated queues.
 ### Music video workflow (`create_music` -> `create_music_video`)
 
 1. Generate the reference images beforehand in
-   `fluxjob/agentvideo/{videoid}/` (performer portraits, optional set/location
-   image). A single performer is enough: only `ref_speaker1_filename` and
-   `ref_speaker1_prompt` are required; `ref_speaker2..4` and
-   `background_filename` are optional, and every provided file needs its
-   prompt. Subject prompts describe the performer identity; the background
-   prompt lists the locations used by the LLM to stage the scenes.
+   `fluxjob/agentvideo/{videoid}/` (performer portraits, one image per
+   location). A single performer is enough: only `ref_speaker1_filename` and
+   `ref_speaker1_prompt` are required; `ref_speaker2..4` are optional and every
+   provided file needs its prompt. Locations are passed as the ordered
+   `backgrounds` list (`[{"filename": ..., "description": ...}]`); the legacy
+   single-location pair `background_filename` / `background_prompt` is still
+   accepted and normalized to a one-item list, but the two forms cannot be
+   mixed. Subject prompts describe the performer identity; each background
+   description is the location text used to stage the scenes.
 2. Call `create_music` with the same `videoid`; each generation result exposes
    its `type_prefix`, such as `music-0123456789-001` (the `.flac` blob is
    `{type_prefix}-{videoid}.flac`).
@@ -43,7 +46,7 @@ dedicated queues.
    `scene_min_seconds` / `scene_max_seconds` (worker defaults 3 / 8),
    `scene_bias` (-1..+1, default 0), `whisper_language` (auto-detected when
    omitted), `orientation` (`Vertical` 704x1280 by default, or `Horizontal`
-   1280x704) and `reuse_music_plan`.
+   1280x704), `backgrounds`, `music_plan` and `reuse_music_plan`.
 4. The clip is written as `{VIDEO_BLOB_PATH_PREFIX}/{videoid}/musicvideo-{token}-001-{videoid}.mp4`.
    The worker also writes `{music_track}-{videoid}.musicplan.json`,
    `.scenes.srt` and `.prompts.srt` next to it. A completed response returns a
@@ -52,7 +55,23 @@ dedicated queues.
    reported by the worker.
 5. `reuse_music_plan=true` re-renders the clip from the existing
    `.musicplan.json` without audio analysis nor LLM calls (for example after
-   changing the reference images or the orientation).
+   changing the reference images or the orientation). It is reserved for
+   re-renders and is mutually exclusive with `music_plan`.
+6. `music_plan` takes a **pre-computed MusicPlan v1 JSON object** (not a blob
+   name, not a JSON string). The MCP server validates it, serializes it and
+   uploads it to
+   `{VIDEO_BLOB_PATH_PREFIX}/{videoid}/{music_track}-{videoid}.musicplan.json`
+   before starting the orchestration, then sends the worker only the simple
+   blob name `{music_track}-{videoid}.musicplan.json`. The plan therefore never
+   transits through the Durable Task input nor the Service Bus message.
+   Validation covers `schema_version=1`, `videoid` / `music_track` matching the
+   call, contiguous scenes indexed from 0, scene `frames` and `total_frames` on
+   the LTX `8k+1` grid with `total_frames == 1 + sum(frames - 1)`, and each
+   scene `prompt` shaped as `"<location>: <action>"` matching exactly one entry
+   of `locations`. `locations` stays in the plan (LTX schema unchanged) and
+   must line up with the separate `backgrounds` argument:
+   `music_plan.locations[i] == backgrounds[i].description`, one reference image
+   per location.
 
 Rendering is slow: expect about 29 minutes of GPU time per minute of song
 (~40 minutes for an 83-second song). The workflow therefore has its own

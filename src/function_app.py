@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from media_workflow import run_media_orchestration
 from models import (
+    BackgroundSpec,
     CompletedMusicVideoWorkflowResult,
     CompletedMusicWorkflowResult,
     CompletedWorkflowResult,
@@ -33,6 +34,7 @@ from models import (
     GetMusicVideoResultInput,
     HDVideoWorkflowOutput,
     MusicMessage,
+    MusicPlan,
     MusicVideoMessage,
     MusicVideoWorkflowOutput,
     MusicWorkflowOutput,
@@ -46,6 +48,7 @@ from media_access import (
     DEFAULT_MEDIA_SAS_TTL_SECONDS,
     MAX_MEDIA_SAS_TTL_SECONDS,
     generate_media_sas_uris,
+    upload_media_blob,
 )
 from music_workflow import (
     aggregate_music_results,
@@ -56,6 +59,7 @@ from music_video_workflow import (
     MUSIC_VIDEO_GENERATION_INDEX,
     aggregate_music_video_results,
     build_music_video_generation,
+    music_plan_blob_path,
     serialize_music_video_message,
 )
 from video_workflow import (
@@ -123,6 +127,29 @@ if VIDEO_SAS_TTL_SECONDS > MAX_MEDIA_SAS_TTL_SECONDS:
         f"VIDEO_SAS_TTL_SECONDS ne doit pas dépasser {MAX_MEDIA_SAS_TTL_SECONDS}."
     )
 
+MediaUploader = Callable[..., Awaitable[str]]
+
+
+async def _upload_music_plan(
+    request: CreateMusicVideoInput,
+    *,
+    uploader: MediaUploader | None = None,
+) -> str:
+    """Upload le plan pré-calculé et rend le nom simple attendu par le worker."""
+
+    if request.music_plan is None:
+        raise ValueError("Aucun music_plan à uploader.")
+    blob_path = music_plan_blob_path(request)
+    await (uploader or upload_media_blob)(
+        blob_path,
+        request.music_plan.serialize(),
+        base_url=VIDEO_BLOB_BASE_URL,
+        content_type="application/json",
+    )
+    logging.info("Uploaded music plan %s", blob_path)
+    return request.music_plan_blob_name()
+
+
 SasUriProvider = Callable[..., Awaitable[dict[str, str]]]
 
 
@@ -182,7 +209,7 @@ def _music_video_artifact_links(output: BaseModel) -> list[ExtraResourceLink]:
             blob_path=artifacts.music_plan_path,
             description=(
                 "Plan musical (scènes calées sur le rythme et prompts), "
-                "réutilisable avec reuse_music_plan."
+                "réutilisable avec reuse_music_plan ou music_plan."
             ),
             mime_type="application/json",
         ),
@@ -349,6 +376,7 @@ def run_music_video_orchestrator(context: df.DurableOrchestrationContext):
         )
 
     request = CreateMusicVideoInput.model_validate(orchestration_input["request"])
+    music_plan_blob = orchestration_input.get("music_plan_blob")
     instance_id = context.instance_id
 
     def build_dispatch():
@@ -360,6 +388,7 @@ def run_music_video_orchestrator(context: df.DurableOrchestrationContext):
             instance_id=instance_id,
             event_key=event_key,
             dts_event_name=dts_event_name,
+            music_plan_blob=music_plan_blob,
         )
         return [descriptor], [
             {
@@ -563,6 +592,7 @@ async def create_music_video(
     ref_speaker4_prompt: str | None = None,
     background_filename: str | None = None,
     background_prompt: str | None = None,
+    backgrounds: List[BackgroundSpec] | None = None,
     orientation: Orientation = Orientation.VERTICAL,
     lyrics: str | None = None,
     theme_style: str | None = None,
@@ -571,6 +601,7 @@ async def create_music_video(
     scene_max_seconds: float | None = None,
     scene_bias: float | None = None,
     whisper_language: str | None = None,
+    music_plan: MusicPlan | None = None,
     reuse_music_plan: bool = False,
 ) -> List[ContentBlock]:
     """Démarre le clip musical d'une chanson create_music (music_track = son type_prefix) et retourne le résultat ou un workflow_id. Compter ~29 min de calcul GPU par minute de chanson."""
@@ -587,6 +618,7 @@ async def create_music_video(
         ref_speaker4_prompt=ref_speaker4_prompt,
         background_filename=background_filename,
         background_prompt=background_prompt,
+        backgrounds=backgrounds,
         orientation=orientation,
         lyrics=lyrics,
         theme_style=theme_style,
@@ -595,14 +627,22 @@ async def create_music_video(
         scene_max_seconds=scene_max_seconds,
         scene_bias=scene_bias,
         whisper_language=whisper_language,
+        music_plan=music_plan,
         reuse_music_plan=reuse_music_plan,
     )
+    client_input: dict[str, Any] = {
+        "request": request.model_dump(
+            mode="json", exclude_none=True, exclude={"music_plan"}
+        ),
+        "timeout_seconds": MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS,
+    }
+    if request.music_plan is not None:
+        # Le plan part en blob avant l'orchestration : DTS et Service Bus ne
+        # transportent que son nom simple.
+        client_input["music_plan_blob"] = await _upload_music_plan(request)
     instance_id = await client.start_new(
         "run_music_video_orchestrator",
-        client_input={
-            "request": request.model_dump(mode="json", exclude_none=True),
-            "timeout_seconds": MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS,
-        },
+        client_input=client_input,
     )
     logging.info("Started music video orchestration %s", instance_id)
     result = await _wait_for_workflow(

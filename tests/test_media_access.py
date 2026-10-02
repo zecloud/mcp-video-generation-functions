@@ -4,7 +4,39 @@ from datetime import datetime, timezone
 import pytest
 
 import media_access
-from media_access import generate_media_sas_uris, media_blob_location
+from media_access import (
+    generate_media_sas_uris,
+    media_blob_location,
+    upload_media_blob,
+)
+
+
+class FakeBlobClient:
+    def __init__(self, container, blob):
+        self.container = container
+        self.blob = blob
+        self.uploads = []
+
+    async def upload_blob(self, content, *, overwrite, content_settings):
+        self.uploads.append((content, overwrite, content_settings.content_type))
+
+
+class FakeUploadBlobServiceClient:
+    def __init__(self, *, account_url, credential):
+        self.account_url = account_url
+        self.credential = credential
+        self.blob_clients = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _traceback):
+        return None
+
+    def get_blob_client(self, *, container, blob):
+        client = FakeBlobClient(container, blob)
+        self.blob_clients.append(client)
+        return client
 
 
 class FakeCredential:
@@ -53,6 +85,53 @@ def test_media_blob_location_rejects_non_https_base_url():
             "video/video/file.mp4",
             "http://storage.example.invalid/"
             "video",
+        )
+
+
+def test_upload_media_blob_writes_json_into_the_working_folder():
+    credential = FakeCredential()
+    clients = []
+
+    def service_client_factory(**kwargs):
+        client = FakeUploadBlobServiceClient(**kwargs)
+        clients.append(client)
+        return client
+
+    url = asyncio.run(
+        upload_media_blob(
+            "video/video-42/music-001-video-42.musicplan.json",
+            b'{"schema_version":1}',
+            base_url="https://storage.example.invalid/video",
+            content_type="application/json",
+            credential_factory=lambda: credential,
+            service_client_factory=service_client_factory,
+        )
+    )
+
+    assert len(clients) == 1
+    blob_client = clients[0].blob_clients[0]
+    assert (blob_client.container, blob_client.blob) == (
+        "video",
+        "video-42/music-001-video-42.musicplan.json",
+    )
+    assert blob_client.uploads == [
+        (b'{"schema_version":1}', True, "application/json")
+    ]
+    assert credential.closed
+    assert url == (
+        "https://storage.example.invalid/video/"
+        "video-42/music-001-video-42.musicplan.json"
+    )
+
+
+def test_upload_media_blob_rejects_paths_outside_the_media_prefix():
+    with pytest.raises(ValueError, match="Chemin blob média"):
+        asyncio.run(
+            upload_media_blob(
+                "autre/video-42/plan.json",
+                b"{}",
+                base_url="https://storage.example.invalid/video",
+            )
         )
 
 

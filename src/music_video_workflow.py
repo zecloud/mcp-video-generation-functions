@@ -22,12 +22,12 @@ from models import (
     MusicVideoArtifacts,
     MusicVideoMessage,
     MusicVideoWorkflowOutput,
+    music_plan_blob_name,
 )
 from video_workflow import ORIENTATION_DIMENSIONS, VIDEO_EXTENSION
 
 MUSIC_VIDEO_TYPE_PREFIX_KIND = "musicvideo"
 MUSIC_VIDEO_GENERATION_INDEX = 0
-MUSIC_PLAN_SUFFIX = "musicplan.json"
 SCENES_SRT_SUFFIX = "scenes.srt"
 PROMPTS_SRT_SUFFIX = "prompts.srt"
 
@@ -43,12 +43,20 @@ def artifact_blob_path(videoid: str, blob_name: str) -> str:
 def music_video_artifacts(videoid: str, music_track: str) -> MusicVideoArtifacts:
     base_name = f"{music_track}-{videoid}"
     return MusicVideoArtifacts(
-        music_plan_path=artifact_blob_path(videoid, f"{base_name}.{MUSIC_PLAN_SUFFIX}"),
+        music_plan_path=artifact_blob_path(
+            videoid, music_plan_blob_name(videoid, music_track)
+        ),
         scenes_srt_path=artifact_blob_path(videoid, f"{base_name}.{SCENES_SRT_SUFFIX}"),
         prompts_srt_path=artifact_blob_path(
             videoid, f"{base_name}.{PROMPTS_SRT_SUFFIX}"
         ),
     )
+
+
+def music_plan_blob_path(request: CreateMusicVideoInput) -> str:
+    """Chemin complet du blob de plan uploadé par le serveur MCP."""
+
+    return artifact_blob_path(request.videoid, request.music_plan_blob_name())
 
 
 def serialize_music_video_message(message: MusicVideoMessage) -> str:
@@ -65,6 +73,7 @@ def build_music_video_generation(
     instance_id: str,
     event_key: str,
     dts_event_name: str,
+    music_plan_blob: str | None = None,
 ) -> tuple[GenerationDescriptor, MusicVideoMessage]:
     index = MUSIC_VIDEO_GENERATION_INDEX
     width, height = ORIENTATION_DIMENSIONS[request.orientation]
@@ -79,11 +88,20 @@ def build_music_video_generation(
         dts_event_name=dts_event_name,
         blob_path=output_blob_path(request.videoid, type_prefix),
     )
+    options = request.worker_options()
+    if music_plan_blob is not None:
+        # Nom du blob uploadé par le serveur MCP avant l'orchestration ; il
+        # survit au passage DTS, qui ne transporte jamais le plan lui-même.
+        if request.reuse_music_plan:
+            raise ValueError(
+                "music_plan et reuse_music_plan sont mutuellement exclusifs."
+            )
+        options["music_plan"] = music_plan_blob
     message = MusicVideoMessage(
         videoid=request.videoid,
         music_track=request.music_track,
         references=request.reference_specs(),
-        **request.worker_options(),
+        **options,
         width=width,
         height=height,
         type_prefix=type_prefix,

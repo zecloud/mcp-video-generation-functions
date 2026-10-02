@@ -457,12 +457,181 @@ MUSIC_VIDEO_OPTIONAL_NUMBER_FIELDS: tuple[str, ...] = (
 )
 
 
+MUSIC_PLAN_SCHEMA_VERSION = 1
+MUSIC_PLAN_SUFFIX = "musicplan.json"
+MUSIC_PLAN_FRAME_GRID = 8
+MAX_BACKGROUNDS = 16
+MAX_MUSIC_PLAN_SCENES = 512
+
+
 def _validate_simple_blob_name(value: str, field_name: str) -> str:
     if "/" in value or "\\" in value or value in {".", ".."}:
         raise ValueError(
             f"{field_name} doit être un nom simple, sans séparateur de chemin."
         )
     return value
+
+
+def music_plan_blob_name(videoid: str, music_track: str) -> str:
+    """Nom simple du blob de plan attendu par le worker ltx25."""
+
+    return f"{music_track}-{videoid}.{MUSIC_PLAN_SUFFIX}"
+
+
+def _decode_json_object(value: Any) -> Any:
+    # Le déclencheur MCP peut transmettre un objet/tableau sous forme de chaîne.
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+class BackgroundSpec(BaseModel):
+    """Décor du clip : une image de référence et sa description de lieu."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    filename: NonEmptyString = Field(
+        description=(
+            "Nom du fichier de référence du décor dans le dossier de travail. "
+            "L'extension .png est ajoutée si elle est absente."
+        )
+    )
+    description: NonEmptyString = Field(
+        description=(
+            "Description du lieu, reprise caractère pour caractère dans "
+            "music_plan.locations à la même position."
+        )
+    )
+
+
+class MusicPlanScene(BaseModel):
+    """Scène d'un plan musical pré-calculé."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    index: int = Field(ge=0)
+    start: float = Field(ge=0)
+    end: float = Field(gt=0)
+    frames: int = Field(gt=0)
+    lyrics_raw: str | None = None
+    lyrics: str | None = None
+    instrumental: bool = False
+    prompt: NonEmptyString
+
+    @model_validator(mode="after")
+    def validate_scene(self) -> "MusicPlanScene":
+        if self.end <= self.start:
+            raise ValueError(
+                f"scenes[{self.index}] : end ({self.end:g}) doit être "
+                f"strictement supérieur à start ({self.start:g})."
+            )
+        if (self.frames - 1) % MUSIC_PLAN_FRAME_GRID != 0:
+            raise ValueError(
+                f"scenes[{self.index}] : frames ({self.frames}) doit être sur "
+                f"la grille 8k+1 du worker LTX."
+            )
+        return self
+
+
+class MusicPlan(BaseModel):
+    """Plan musical pré-calculé, sérialisé tel quel dans le blob du worker."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = Field(
+        default=MUSIC_PLAN_SCHEMA_VERSION,
+        description="Version du contrat de plan ; seule la version 1 est acceptée.",
+    )
+    videoid: NonEmptyString
+    music_track: NonEmptyString
+    fps: int = Field(gt=0, le=240)
+    duration_seconds: float = Field(gt=0)
+    total_frames: int = Field(gt=0)
+    subject: NonEmptyString
+    locations: list[NonEmptyString] = Field(min_length=1, max_length=MAX_BACKGROUNDS)
+    theme_style: str | None = None
+    story: str | None = None
+    lyrics_reference: str | None = None
+    scene_min_seconds: float | None = None
+    scene_max_seconds: float | None = None
+    scene_bias: float | None = None
+    whisper_model: str | None = None
+    whisper_language: str | None = None
+    llm_model: str | None = None
+    scenes: list[MusicPlanScene] = Field(min_length=1, max_length=MAX_MUSIC_PLAN_SCENES)
+
+    @field_validator("music_track")
+    @classmethod
+    def validate_music_track(cls, value: str) -> str:
+        return _validate_simple_blob_name(value, "music_plan.music_track")
+
+    @model_validator(mode="after")
+    def validate_plan(self) -> "MusicPlan":
+        if len(set(self.locations)) != len(self.locations):
+            raise ValueError("music_plan.locations contient des doublons.")
+
+        previous_end = 0.0
+        for position, scene in enumerate(self.scenes):
+            if scene.index != position:
+                raise ValueError(
+                    f"music_plan.scenes[{position}] : index {scene.index} "
+                    "incohérent ; les scènes doivent être ordonnées à partir de 0."
+                )
+            if abs(scene.start - previous_end) > 1e-3:
+                raise ValueError(
+                    f"music_plan.scenes[{position}] : start ({scene.start:g}) ne "
+                    f"prolonge pas la scène précédente ({previous_end:g}) ; les "
+                    "scènes doivent couvrir la chanson sans trou ni recouvrement."
+                )
+            previous_end = scene.end
+
+        if previous_end - self.duration_seconds > 1e-3:
+            raise ValueError(
+                f"music_plan : les scènes couvrent {previous_end:g} s au-delà de "
+                f"duration_seconds ({self.duration_seconds:g})."
+            )
+
+        expected_total = 1 + sum(scene.frames - 1 for scene in self.scenes)
+        if self.total_frames != expected_total:
+            raise ValueError(
+                f"music_plan.total_frames ({self.total_frames}) doit valoir "
+                f"1 + somme(frames - 1) = {expected_total}."
+            )
+        if (self.total_frames - 1) % MUSIC_PLAN_FRAME_GRID != 0:
+            raise ValueError(
+                f"music_plan.total_frames ({self.total_frames}) doit être sur la "
+                "grille 8k+1 du worker LTX."
+            )
+
+        for scene in self.scenes:
+            self._scene_location(scene)
+        return self
+
+    def _scene_location(self, scene: MusicPlanScene) -> str:
+        matches = [
+            location
+            for location in self.locations
+            if scene.prompt.startswith(f"{location}: ")
+            and scene.prompt[len(location) + 2 :].strip()
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"music_plan.scenes[{scene.index}] : prompt doit valoir "
+                "« <location>: <action> » avec exactement un décor de "
+                f"locations ; {len(matches)} correspondance(s) exacte(s)."
+            )
+        return matches[0]
+
+    def scene_locations(self) -> list[str]:
+        """Décor retenu pour chaque scène, dans l'ordre."""
+
+        return [self._scene_location(scene) for scene in self.scenes]
+
+    def serialize(self) -> bytes:
+        return self.model_dump_json(exclude_none=True).encode("utf-8")
 
 
 def _validate_scene_bounds(
@@ -556,8 +725,9 @@ class CreateMusicVideoInput(BaseModel):
     background_filename: NonEmptyString | None = Field(
         default=None,
         description=(
-            "Nom du fichier de référence du décor (optionnel). "
-            "L'extension .png est ajoutée si elle est absente."
+            "Nom du fichier de référence du décor unique (optionnel, hérité). "
+            "L'extension .png est ajoutée si elle est absente. Utilisez "
+            "backgrounds pour plusieurs décors."
         ),
     )
     background_prompt: NonEmptyString | None = Field(
@@ -565,6 +735,15 @@ class CreateMusicVideoInput(BaseModel):
         description=(
             "Description du ou des lieux du clip, utilisée par le LLM pour "
             "situer les scènes. Obligatoire si background_filename est fourni."
+        ),
+    )
+    backgrounds: List[BackgroundSpec] | None = Field(
+        default=None,
+        max_length=MAX_BACKGROUNDS,
+        description=(
+            "Liste ordonnée des décors du clip ({filename, description}). "
+            "Avec music_plan, locations[i] doit valoir backgrounds[i].description. "
+            "Incompatible avec background_filename / background_prompt."
         ),
     )
     orientation: Orientation = Field(
@@ -626,14 +805,30 @@ class CreateMusicVideoInput(BaseModel):
             "détection automatique si absent."
         ),
     )
+    music_plan: MusicPlan | None = Field(
+        default=None,
+        description=(
+            "Plan musical pré-calculé, transmis en objet JSON. Le serveur MCP "
+            "le valide, le sérialise et l'upload dans "
+            "agentvideo/{videoid}/{music_track}-{videoid}.musicplan.json avant "
+            "de démarrer l'orchestration ; le worker saute alors l'analyse "
+            "audio et les appels LLM. Incompatible avec reuse_music_plan."
+        ),
+    )
     reuse_music_plan: bool = Field(
         default=False,
         description=(
             "Si vrai, réutilise le plan existant "
             "{music_track}-{videoid}.musicplan.json : re-rendu du clip sans "
-            "nouvelle analyse audio ni appels LLM."
+            "nouvelle analyse audio ni appels LLM. Réservé aux re-rendus et "
+            "incompatible avec music_plan."
         ),
     )
+
+    @field_validator("music_plan", "backgrounds", mode="before")
+    @classmethod
+    def decode_json_payloads(cls, value: Any) -> Any:
+        return _decode_json_object(value)
 
     @field_validator("orientation", mode="before")
     @classmethod
@@ -650,16 +845,42 @@ class CreateMusicVideoInput(BaseModel):
     def validate_music_track(cls, value: str) -> str:
         return _validate_simple_blob_name(value, "music_track")
 
+    def background_specs(self) -> list[BackgroundSpec]:
+        """Décors normalisés : la liste explicite, ou le décor legacy seul."""
+
+        if self.backgrounds is not None:
+            return list(self.backgrounds)
+        if self.background_filename is not None and self.background_prompt is not None:
+            return [
+                BackgroundSpec(
+                    filename=self.background_filename,
+                    description=self.background_prompt,
+                )
+            ]
+        return []
+
+    def music_plan_blob_name(self) -> str:
+        return music_plan_blob_name(self.videoid, self.music_track)
+
     def reference_specs(self) -> list[ReferenceSpec]:
-        return [
+        specs = [
             ReferenceSpec(
                 file=_ensure_png_when_extensionless(getattr(self, filename_field)),
                 prompt=getattr(self, prompt_field),
-                is_background=is_background,
+                is_background=False,
             )
             for filename_field, prompt_field, is_background in REFERENCE_FIELDS
-            if getattr(self, filename_field) is not None
+            if not is_background and getattr(self, filename_field) is not None
         ]
+        specs.extend(
+            ReferenceSpec(
+                file=_ensure_png_when_extensionless(background.filename),
+                prompt=background.description,
+                is_background=True,
+            )
+            for background in self.background_specs()
+        )
+        return specs
 
     def worker_options(self) -> dict[str, Any]:
         options: dict[str, Any] = {
@@ -670,12 +891,32 @@ class CreateMusicVideoInput(BaseModel):
             )
             if getattr(self, name) is not None
         }
-        if self.reuse_music_plan:
+        if self.music_plan is not None:
+            # Le worker reçoit le nom simple du blob uploadé par le serveur MCP,
+            # jamais le plan lui-même.
+            options["music_plan"] = self.music_plan_blob_name()
+        elif self.reuse_music_plan:
             options["music_plan"] = True
         return options
 
     @model_validator(mode="after")
     def validate_references_and_budgets(self) -> "CreateMusicVideoInput":
+        if self.music_plan is not None and self.reuse_music_plan:
+            raise ValueError(
+                "music_plan et reuse_music_plan sont mutuellement exclusifs : "
+                "music_plan fournit un plan pré-calculé, reuse_music_plan est "
+                "réservé aux re-rendus du plan déjà présent dans le dossier."
+            )
+
+        legacy_background = (
+            self.background_filename is not None or self.background_prompt is not None
+        )
+        if self.backgrounds is not None and legacy_background:
+            raise ValueError(
+                "backgrounds et background_filename / background_prompt sont "
+                "mutuellement exclusifs : utilisez la liste ordonnée backgrounds."
+            )
+
         inconsistent = []
         for filename_field, prompt_field, _ in REFERENCE_FIELDS:
             has_filename = getattr(self, filename_field) is not None
@@ -691,7 +932,45 @@ class CreateMusicVideoInput(BaseModel):
 
         _validate_scene_bounds(self.scene_min_seconds, self.scene_max_seconds)
 
-        request_size = len(self.model_dump_json(exclude_none=True).encode("utf-8"))
+        backgrounds = self.background_specs()
+        if self.music_plan is not None:
+            plan = self.music_plan
+            if plan.videoid != self.videoid:
+                raise ValueError(
+                    f"music_plan.videoid ({plan.videoid!r}) doit valoir "
+                    f"videoid ({self.videoid!r})."
+                )
+            if plan.music_track != self.music_track:
+                raise ValueError(
+                    f"music_plan.music_track ({plan.music_track!r}) doit valoir "
+                    f"music_track ({self.music_track!r})."
+                )
+            if len(backgrounds) != len(plan.locations):
+                raise ValueError(
+                    f"backgrounds fournit {len(backgrounds)} décor(s) alors que "
+                    f"music_plan.locations en déclare {len(plan.locations)} ; il "
+                    "faut une image de référence par lieu, dans le même ordre."
+                )
+            mismatched = [
+                f"locations[{index}] ({location!r}) != "
+                f"backgrounds[{index}].description ({background.description!r})"
+                for index, (location, background) in enumerate(
+                    zip(plan.locations, backgrounds, strict=True)
+                )
+                if location != background.description
+            ]
+            if mismatched:
+                raise ValueError(
+                    "Décors incohérents avec le plan : " + " ; ".join(mismatched) + "."
+                )
+
+        # Le plan est uploadé en blob avant l'orchestration : il ne transite
+        # jamais par l'entrée DTS, qui ne porte que le nom simple du blob.
+        request_size = len(
+            self.model_dump_json(exclude_none=True, exclude={"music_plan"}).encode(
+                "utf-8"
+            )
+        )
         if request_size > DTS_INPUT_BUDGET_BYTES:
             raise ValueError(
                 f"L’entrée DTS occupe {request_size} octets UTF-8 ; "
@@ -741,7 +1020,9 @@ class MusicVideoMessage(BaseModel):
 
     videoid: NonEmptyString
     music_track: NonEmptyString
-    music_plan: Literal[True] | None = None
+    # ``True`` déclenche le mode reuse legacy du worker ; une chaîne nomme le
+    # blob JSON à télécharger depuis agentvideo/{videoid}/.
+    music_plan: Literal[True] | NonEmptyString | None = None
     references: list[ReferenceSpec] = Field(min_length=1)
     lyrics: NonEmptyString | None = None
     theme_style: NonEmptyString | None = None
@@ -762,6 +1043,13 @@ class MusicVideoMessage(BaseModel):
     @classmethod
     def validate_music_track(cls, value: str) -> str:
         return _validate_simple_blob_name(value, "music_track")
+
+    @field_validator("music_plan")
+    @classmethod
+    def validate_music_plan(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return _validate_simple_blob_name(value, "music_plan")
+        return value
 
     @model_validator(mode="after")
     def validate_scene_bounds(self) -> "MusicVideoMessage":
