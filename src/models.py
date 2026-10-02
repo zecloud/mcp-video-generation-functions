@@ -626,7 +626,7 @@ class MusicPlan(BaseModel):
 
         for scene in self.scenes:
             scene_duration = scene.end - scene.start
-            target_frames = max(9, math.ceil(scene_duration * self.fps) + 1)
+            target_frames = max(9, math.ceil(scene_duration * self.fps))
             expected_frames = 1 + MUSIC_PLAN_FRAME_GRID * math.ceil(
                 (target_frames - 1) / MUSIC_PLAN_FRAME_GRID
             )
@@ -853,11 +853,6 @@ class CreateMusicVideoInput(BaseModel):
             "incompatible avec music_plan."
         ),
     )
-
-    @field_validator("music_plan", "backgrounds", mode="before")
-    @classmethod
-    def decode_json_payloads(cls, value: Any) -> Any:
-        return _decode_json_object(value)
 
     @field_validator("orientation", mode="before")
     @classmethod
