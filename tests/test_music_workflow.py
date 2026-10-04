@@ -74,6 +74,46 @@ def test_optional_lora_is_omitted_from_serialized_message():
     assert "lora" not in json.loads(serialize_music_message(message))
 
 
+@pytest.mark.parametrize("track_fields", [{}, {"lora": None}])
+def test_missing_and_null_lora_keep_worker_default(track_fields):
+    request = CreateMusicInput(
+        videoid="video-42",
+        tracks=[{"style": "pop", "lyrics": "[instrumental]", **track_fields}],
+    )
+    _, message = build_music_generation(
+        request, index=0, instance_id="instance-1",
+        event_key="event-key-0", dts_event_name="music-0-uuid",
+    )
+
+    assert message.lora is None
+    assert "lora" not in json.loads(serialize_music_message(message))
+
+
+@pytest.mark.parametrize("lora", ["none", MusicLora.NONE])
+def test_explicit_no_lora_is_preserved_in_queue_message(lora):
+    request = CreateMusicInput(
+        videoid="video-42",
+        tracks=[{"style": "acoustic pop", "lyrics": "[instrumental]", "lora": lora}],
+    )
+    descriptor, message = build_music_generation(
+        request, index=0, instance_id="instance-1",
+        event_key="event-key-0", dts_event_name="music-0-uuid",
+    )
+
+    assert request.tracks[0].lora is MusicLora.NONE
+    assert message.lora is MusicLora.NONE
+    assert json.loads(serialize_music_message(message))["lora"] == "none"
+    assert descriptor.prompt == "acoustic pop (none)"
+    assert json.loads(request.model_dump_json(exclude_none=True))["tracks"][0]["lora"] == "none"
+
+
+def test_music_schema_advertises_explicit_no_lora():
+    schema = CreateMusicInput.model_json_schema()
+    assert set(schema["$defs"]["MusicLora"]["enum"]) == {
+        "none", "two_steps_from_hell", "industrial_rock",
+    }
+
+
 def test_music_output_shares_video_working_folder_with_flac_extension():
     assert output_blob_path("video-42", "music-token-001") == (
         "video/video-42/music-token-001-video-42.flac"
