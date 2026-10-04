@@ -49,6 +49,7 @@ class Orientation(str, Enum):
 
 
 class MusicLora(str, Enum):
+    NONE = "none"
     TWO_STEPS_FROM_HELL = "two_steps_from_hell"
     INDUSTRIAL_ROCK = "industrial_rock"
 
@@ -342,7 +343,11 @@ class TrackSpec(BaseModel):
     )
     lora: MusicLora | None = Field(
         default=None,
-        description="LoRA optionnel appliqué à la génération du morceau.",
+        description=(
+            'LoRA appliqué à la génération ; "none" utilise le modèle de base '
+            "sans LoRA. Champ absent ou null : preset two_steps_from_hell "
+            "par défaut côté Yue2."
+        ),
     )
 
     @field_validator("lora", mode="before")

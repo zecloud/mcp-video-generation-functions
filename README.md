@@ -15,7 +15,7 @@ dedicated queues.
   and returns `running`, `completed`, `failed`, or `not_found`.
 - `create_music` validates `CreateMusicInput` (an existing `videoid` plus a
   non-empty list of tracks, each with `style`, `lyrics` and an optional `lora`
-  among `two_steps_from_hell` and `industrial_rock`) and runs the same
+  among `two_steps_from_hell`, `industrial_rock` and `none`) and runs the same
   fan-out/fan-in orchestration on the music queue.
 - `get_music_result` mirrors `get_hd_video_result` for music workflows.
 - `create_music_video` validates `CreateMusicVideoInput` and starts one
@@ -96,6 +96,22 @@ coexist without collision. The queue message carries `videoid`, `style`,
 (`type_prefix`, `instance_id`, `event_key`, `dts_event_name`, `seed`). The
 worker answers on the DTS event `music-{index}-{uuid}` with the same
 `status` / `event_key` / `error` / `retryable` contract as video.
+
+Use the explicit string `"lora": "none"` to generate with the Yue2 base
+model without applying an adapter. For example:
+
+```json
+{
+  "videoid": "video-42",
+  "tracks": [
+    {"style": "Acoustic pop", "lyrics": "[instrumental]", "lora": "none"}
+  ]
+}
+```
+
+An omitted or JSON `null` `lora` is still omitted from the queue message;
+Yue2 then uses its historical `two_steps_from_hell` default, not base mode.
+The worker must support `"none"` before this new MCP option is used.
 
 Every generation result contains its prompt/index, terminal status,
 deterministic blob path and `type_prefix`, optional `num_frames` (and
