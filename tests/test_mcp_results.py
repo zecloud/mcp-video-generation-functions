@@ -2,6 +2,8 @@ import asyncio
 import json
 from dataclasses import dataclass
 
+import pytest
+
 from azure.core.exceptions import AzureError
 from azure.functions import mcp as functions_mcp
 from function_app import (
@@ -303,6 +305,41 @@ def test_completed_music_result_returns_analysis_link_and_fields():
         ("music-001-video-42.flac", "audio/flac"),
         ("music-001-video-42.musicanalysis.json", "application/json"),
     ]
+
+
+@pytest.mark.parametrize("slider,strength,applied", [(None, 0, False), ("metal", 0, False), ("female", 1, True)])
+@pytest.mark.parametrize("string_output", [False, True])
+def test_music_polling_and_content_blocks_preserve_slider_completion(slider, strength, applied, string_output):
+    output = music_workflow_output()
+    metadata = {
+        "slider": slider,
+        "slider_strength": strength,
+        "slider_applied": applied,
+        "slider_release": "particle-gmix-1600-v2" if slider else None,
+        "slider_revision": "33cf42fb0a54f60d8264d64cf6c20f038c4d172b" if slider else None,
+        "slider_load_seconds": 0.125 if applied else 0,
+    }
+    output["generations"][0].update(metadata)
+    result = _workflow_response(
+        DurableStatus(RuntimeStatus("Completed"), "workflow-1", json.dumps(output) if string_output else output),
+        "workflow-1", profile=MUSIC_PROFILE,
+    )
+    assert isinstance(result, CompletedMusicWorkflowResult)
+    blocks = asyncio.run(_to_content_blocks(result, sas_uri_provider=fake_sas_uri_provider))
+    generation = json.loads(blocks[0].text)["result"]["generations"][0]
+    assert {name: generation[name] for name in metadata} == metadata
+    assert blocks[1].mimeType == "audio/flac"
+
+
+def test_old_music_callback_keeps_previous_content_block_structure():
+    result = _workflow_response(
+        DurableStatus(RuntimeStatus("Completed"), "workflow-1", music_workflow_output()),
+        "workflow-1", profile=MUSIC_PROFILE,
+    )
+    blocks = asyncio.run(_to_content_blocks(result, sas_uri_provider=fake_sas_uri_provider))
+    generation = json.loads(blocks[0].text)["result"]["generations"][0]
+    assert not any(name.startswith("slider") for name in generation)
+    assert len(blocks) == 2
 
 
 def test_music_running_result_points_to_get_music_result():

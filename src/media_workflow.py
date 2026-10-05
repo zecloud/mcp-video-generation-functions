@@ -123,13 +123,15 @@ def aggregate_results(
     descriptors: Sequence[GenerationDescriptor],
     event_payloads: Mapping[int, Any],
     timed_out_indexes: set[int],
+    result_model: type[GenerationResult] = GenerationResult,
+    completed_fields: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
 ) -> list[GenerationResult]:
     results: list[GenerationResult] = []
 
     for descriptor in descriptors:
         if descriptor.index in timed_out_indexes:
             results.append(
-                GenerationResult(
+                result_model(
                     index=descriptor.index,
                     prompt=descriptor.prompt,
                     status="timeout",
@@ -150,7 +152,7 @@ def aggregate_results(
             if status == "completed":
                 music_plan = payload.get("music_plan")
                 results.append(
-                    GenerationResult(
+                    result_model(
                         index=descriptor.index,
                         prompt=descriptor.prompt,
                         status="completed",
@@ -163,12 +165,13 @@ def aggregate_results(
                             else None
                         ),
                         **analysis_fields(payload, descriptor.blob_path),
+                        **(completed_fields(payload) if completed_fields else {}),
                     )
                 )
             else:
                 error = str(payload.get("error") or "La génération a échoué.")
                 results.append(
-                    GenerationResult(
+                    result_model(
                         index=descriptor.index,
                         prompt=descriptor.prompt,
                         status="failed",
@@ -179,7 +182,7 @@ def aggregate_results(
                 )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             results.append(
-                GenerationResult(
+                result_model(
                     index=descriptor.index,
                     prompt=descriptor.prompt,
                     status="failed",

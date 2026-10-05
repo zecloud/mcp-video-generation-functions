@@ -15,8 +15,9 @@ dedicated queues.
   and returns `running`, `completed`, `failed`, or `not_found`.
 - `create_music` validates `CreateMusicInput` (an existing `videoid` plus a
   non-empty list of tracks, each with `style`, `lyrics` and an optional `lora`
-  among `two_steps_from_hell`, `industrial_rock` and `none`) and runs the same
-  fan-out/fan-in orchestration on the music queue.
+  among `two_steps_from_hell`, `industrial_rock` and `none`, plus optional
+  native YuE2 `slider` / `slider_strength` controls) and runs the same
+  fan-out/fan-in orchestration on the YuE2 music queue.
 - `get_music_result` mirrors `get_hd_video_result` for music workflows.
 - `create_music_video` validates `CreateMusicVideoInput` and starts one
   "music video" generation on the video queue (`VIDEO_SERVICE_BUS_QUEUE_NAME`,
@@ -92,7 +93,7 @@ Music generations reuse the video working folder
 (`{VIDEO_BLOB_PATH_PREFIX}/{videoid}/`) and are written as `.flac`. Their
 `type_prefix` starts with `music-` instead of `hdvideo-`, so both media types
 coexist without collision. The queue message carries `videoid`, `style`,
-`lyrics`, the optional `lora`, and the same correlation fields
+`lyrics`, the optional `lora`, `slider` and `slider_strength`, and the same correlation fields
 (`type_prefix`, `instance_id`, `event_key`, `dts_event_name`, `seed`). The
 worker answers on the DTS event `music-{index}-{uuid}` with the same
 `status` / `event_key` / `error` / `retryable` contract as video.
@@ -112,6 +113,68 @@ model without applying an adapter. For example:
 An omitted or JSON `null` `lora` is still omitted from the queue message;
 Yue2 then uses its historical `two_steps_from_hell` default, not base mode.
 The worker must support `"none"` before this new MCP option is used.
+
+### Native YuE2 sliders (`create_music` only)
+
+Each entry of `tracks` can select **one** experimental native concept slider:
+`female`, `male`, `pop`, `hiphop`, `rnb`, `indie-rock`, `pop-punk`, `metal`,
+`country`, `acoustic-folk`, `house`, `disco-funk`, `kpop`, `reggaeton`,
+`afrobeats`, or `lofi`. Arrays and stacking are rejected. These controls are
+not exposed to video/music-video tools or other music engines.
+
+```json
+{
+  "videoid": "video-42",
+  "tracks": [
+    {
+      "style": "Acoustic pop, warm vocals, guitar and piano",
+      "lyrics": "[instrumental]",
+      "lora": "none",
+      "slider": "female",
+      "slider_strength": 0.5
+    }
+  ]
+}
+```
+
+- An omitted or `null` `slider` means no selection. `slider_strength` must
+  then be **omitted**, even for zero; explicitly supplying `null` is invalid.
+- With a slider, strength is a finite JSON number in `[0,1]`; booleans,
+  strings, `null`, NaN and infinity are rejected. Omission is preserved through
+  MCP, Durable and Service Bus, leaving the worker's effective default `1`.
+  Historical requests do not gain a strength/default/null in their messages.
+- Every selection requires explicit `"lora": "none"`, even strength `0`.
+  Missing/null or named-preset LoRA is rejected, never silently replaced.
+  Strength zero preserves the selected identity/provenance but applies no
+  slider and triggers no slider loader/download on the worker.
+- The worker must support this contract and have `YUE2_ENABLE_SLIDERS=true`
+  (off by default), including for strength zero. A positive strength additionally
+  requires worker backend `torch` or `torch-eager`, quantization `none` and
+  `offload_ar=false`. These are **worker-side requirements**, not MCP parameters
+  or settings changed by this server.
+- Worker `cot` remains `full` by default; `off` is only a guide recommendation,
+  not a new default. This change does not add `cot`, `ar_scale` or `nar_scale`
+  to the MCP API. Presets, deterministic seed, analysis and correlation are
+  unchanged. The worker forces effective LoRA scales to zero with `lora=none`.
+
+The source contract is
+[zecloud/func_tts_eurovibe#68](https://github.com/zecloud/func_tts_eurovibe/pull/68),
+verified at commit
+[`ce6de3f`](https://github.com/zecloud/func_tts_eurovibe/tree/ce6de3f/yue2)
+(`function_app.py`, `sliders.py`, `README.md`). Provenance/downloads stay on
+that worker: release `particle-gmix-1600-v2`, revision
+`33cf42fb0a54f60d8264d64cf6c20f038c4d172b`. Weights have non-commercial
+CC BY-NC 4.0 restrictions; controls are experimental, not quality guarantees.
+No loader, weights, image build or remote configuration is added here. A worker
+rollout and GPU/audio acceptance remain separate prerequisites.
+
+Music completion results relay `slider`, `slider_strength`, `slider_applied`,
+`slider_release`, `slider_revision` and `slider_load_seconds` when the worker
+reports them. Without a selection the worker reports identity/release/revision
+as `null`, strength `0` and applied `false`; those explicit nulls survive MCP
+serialization. A zero selection retains its ID/release/revision with applied
+`false`. Older callbacks without these fields remain valid and do not gain
+invented metadata. Video result schemas/structure stay unchanged.
 
 Every generation result contains its prompt/index, terminal status,
 deterministic blob path and `type_prefix`, optional `num_frames` (and
@@ -152,6 +215,16 @@ py -3.13 -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python -m pytest -q
 ```
+
+Targeted offline music/MCP/Durable regression tests (no Azure access):
+
+```powershell
+python -m pytest -q tests\test_yue2_controls.py tests\test_music_workflow.py tests\test_mcp_results.py tests\test_orchestrator.py
+```
+
+These cover validation, omission versus null, per-track queue mapping, the MCP
+handler → Durable activity → output binding path and completion metadata. They
+use mocked queues/events/storage, not a deployed worker or real GPU/audio.
 
 `src/local.settings.json` contains no secret. Start the Durable Task Scheduler
 emulator on port 8080 before running the Function App locally. The same

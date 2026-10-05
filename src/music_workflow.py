@@ -12,8 +12,10 @@ from media_workflow import output_blob_path as media_output_blob_path
 from models import (
     CreateMusicInput,
     GenerationDescriptor,
+    MusicGenerationResult,
     MusicMessage,
     MusicWorkflowOutput,
+    YUE2_SLIDER_COMPLETION_FIELDS,
 )
 
 MUSIC_EXTENSION = "flac"
@@ -57,9 +59,7 @@ def build_music_generation(
     )
     message = MusicMessage(
         videoid=request.videoid,
-        style=track.style,
-        lyrics=track.lyrics,
-        lora=track.lora,
+        **track.model_dump(exclude_none=True),
         type_prefix=type_prefix,
         instance_id=instance_id,
         event_key=event_key,
@@ -83,5 +83,11 @@ def aggregate_music_results(
             descriptors=descriptors,
             event_payloads=event_payloads,
             timed_out_indexes=timed_out_indexes,
+            result_model=MusicGenerationResult,
+            completed_fields=lambda payload: {
+                name: payload[name]
+                for name in YUE2_SLIDER_COMPLETION_FIELDS
+                if name in payload
+            },
         ),
     )
