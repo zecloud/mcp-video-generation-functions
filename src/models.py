@@ -56,6 +56,53 @@ class MusicLora(str, Enum):
     INDUSTRIAL_ROCK = "industrial_rock"
 
 
+AudioReferenceFilename = Annotated[str, StringConstraints(min_length=1)]
+
+
+def _validate_audio_reference_filename(value: str) -> str:
+    if value != value.strip():
+        raise ValueError("Le nom audio_ref doit être exact, sans espaces périphériques.")
+    return _validate_simple_blob_name(value, "audio_ref")
+
+
+def _validate_video_reference_payload(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    specs = payload.get("references")
+    if specs is not None:
+        if any(key in payload for key in ("audio_ref1", "audio_ref2")):
+            raise ValueError("Ne pas mélanger references[] et audio_ref1/audio_ref2, même null.")
+        if not isinstance(specs, list):
+            return payload
+        refs = [
+            spec.model_dump(exclude_none=True) if isinstance(spec, ReferenceSpec) else spec
+            for spec in specs
+        ]
+        if not all(isinstance(ref, dict) for ref in refs):
+            return payload
+        voiced = any(ref.get("audio_ref") is not None for ref in refs)
+        if voiced:
+            if any(key in payload for key in ("pic1", "pic2", "pic3", "pic4", "background")):
+                raise ValueError("Ne pas mélanger references[] vocales et images legacy, même null.")
+            if not 1 <= len(refs) <= 5:
+                raise ValueError("AVref nécessite 1 à 5 images de référence.")
+            subjects = [ref for ref in refs if not ref.get("is_background", False)]
+            if any(ref.get("audio_ref") is not None for ref in subjects[2:]):
+                raise ValueError("AVref autorise des voix uniquement sur les sujets 1/2.")
+    else:
+        voiced = any(payload.get(f"audio_ref{i}") is not None for i in (1, 2))
+        if voiced:
+            for i in (1, 2):
+                if payload.get(f"audio_ref{i}") is not None and not payload.get(f"pic{i}"):
+                    raise ValueError(f"audio_ref{i} nécessite pic{i}.")
+            slots = [i for i in range(1, 5) if payload.get(f"pic{i}")]
+            if slots != list(range(1, max(slots) + 1)):
+                raise ValueError("Les images AVref doivent être contiguës pic1..picN.")
+    if voiced and any(payload.get(key) for key in ("sound", "music_track", "music_plan")):
+        raise ValueError("AVref est incompatible avec sound/music_track/music_plan.")
+    return payload
+
+
 class ReferenceSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -66,6 +113,25 @@ class ReferenceSpec(BaseModel):
         description="Description visuelle de l'identité associée à la référence."
     )
     is_background: bool = False
+    audio_ref: AudioReferenceFilename | None = None
+
+    @field_validator("audio_ref")
+    @classmethod
+    def validate_audio_filename(cls, value: str | None) -> str | None:
+        return _validate_audio_reference_filename(value) if value is not None else None
+
+    @model_serializer(mode="wrap")
+    def omit_absent_voice(self, handler):
+        data = handler(self)
+        if self.audio_ref is None:
+            data.pop("audio_ref", None)
+        return data
+
+    @model_validator(mode="after")
+    def reject_background_voice(self) -> "ReferenceSpec":
+        if self.is_background and self.audio_ref is not None:
+            raise ValueError("Un décor ne peut pas avoir de voix audio_ref.")
+        return self
 
 
 def _ensure_png_when_extensionless(filename: str) -> str:
@@ -185,6 +251,28 @@ class CreateHDVideoInput(BaseModel):
                 return value
         return value
 
+    audio_ref1: AudioReferenceFilename | None = Field(
+        default=None,
+        description=(
+            "Nom exact du blob vocal associé à ref_speaker1_filename dans "
+            "fluxjob/agentvideo/{videoid}/ (optionnel, WAV recommandé). "
+            "Aucune extension ajoutée ; incompatible avec une bande-son cible."
+        ),
+    )
+    audio_ref2: AudioReferenceFilename | None = Field(
+        default=None,
+        description=(
+            "Nom exact du blob vocal associé à ref_speaker2_filename dans "
+            "fluxjob/agentvideo/{videoid}/ (optionnel, WAV recommandé). "
+            "Peut être fourni sans audio_ref1 ; les deux images restent présentes."
+        ),
+    )
+
+    @field_validator("audio_ref1", "audio_ref2")
+    @classmethod
+    def validate_audio_filename(cls, value: str | None) -> str | None:
+        return _validate_audio_reference_filename(value) if value is not None else None
+
     @field_validator("prompts")
     @classmethod
     def validate_prompt_utf8_sizes(cls, prompts: List[str]) -> List[str]:
@@ -257,6 +345,10 @@ class CreateHDVideoInput(BaseModel):
                 }
                 for filename_field, prompt_field, is_background in provided
             ]
+            for slot in (1, 2):
+                audio_ref = getattr(self, f"audio_ref{slot}")
+                if audio_ref is not None:
+                    references_payload[slot - 1]["audio_ref"] = audio_ref
         else:
             legacy_payload = {}
             legacy_keys = ("pic1", "pic2", "pic3", "pic4", "background")
@@ -269,6 +361,11 @@ class CreateHDVideoInput(BaseModel):
                         filename
                     )
 
+            for slot in (1, 2):
+                audio_ref = getattr(self, f"audio_ref{slot}")
+                if audio_ref is not None:
+                    legacy_payload[f"audio_ref{slot}"] = audio_ref
+
         for index, prompt in enumerate(self.prompts):
             message_content: dict[str, Any] = {
                 "videoid": self.videoid,
@@ -278,6 +375,7 @@ class CreateHDVideoInput(BaseModel):
                 message_content["references"] = references_payload
             else:
                 message_content.update(legacy_payload)
+            _validate_video_reference_payload(message_content)
             user_content = json.dumps(
                 message_content,
                 ensure_ascii=False,
@@ -316,6 +414,8 @@ class VideoMessage(BaseModel):
     pic4: NonEmptyString | None = None
     background: NonEmptyString | None = None
     references: list[ReferenceSpec] | None = None
+    audio_ref1: AudioReferenceFilename | None = None
+    audio_ref2: AudioReferenceFilename | None = None
     min_seconds: float | None = None
     max_seconds: float | None = None
     width: int = Field(gt=0)
@@ -325,6 +425,21 @@ class VideoMessage(BaseModel):
     event_key: NonEmptyString
     dts_event_name: NonEmptyString
     seed: int = Field(ge=0, le=2_147_483_647)
+
+    @model_validator(mode="after")
+    def validate_normalized_reference_contract(self) -> "VideoMessage":
+        _validate_video_reference_payload(self.model_dump(exclude_none=True))
+        return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_reference_contract(cls, value: Any) -> Any:
+        return _validate_video_reference_payload(value)
+
+    @field_validator("audio_ref1", "audio_ref2")
+    @classmethod
+    def validate_audio_filename(cls, value: str | None) -> str | None:
+        return _validate_audio_reference_filename(value) if value is not None else None
 
 
 class MusicSlider(str, Enum):
@@ -1169,6 +1284,8 @@ class MusicVideoMessage(BaseModel):
     @model_validator(mode="after")
     def validate_scene_bounds(self) -> "MusicVideoMessage":
         _validate_scene_bounds(self.scene_min_seconds, self.scene_max_seconds)
+        if any(reference.audio_ref is not None for reference in self.references):
+            raise ValueError("AVref est incompatible avec music_track/music_plan.")
         return self
 
 

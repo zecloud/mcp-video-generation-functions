@@ -95,8 +95,13 @@ def build_generation(
                 file=ensure_png_when_extensionless(getattr(request, filename_field)),
                 prompt=getattr(request, prompt_field),
                 is_background=is_background,
+                audio_ref=(
+                    getattr(request, f"audio_ref{slot}") if slot in (1, 2) else None
+                ),
             )
-            for filename_field, prompt_field, is_background in REFERENCE_FIELDS
+            for slot, (filename_field, prompt_field, is_background) in enumerate(
+                REFERENCE_FIELDS, 1
+            )
             if getattr(request, filename_field) is not None
         ]
     else:
@@ -104,6 +109,10 @@ def build_generation(
             filename = getattr(request, filename_field)
             if filename is not None:
                 legacy_pics[legacy_key] = ensure_png_when_extensionless(filename)
+        for slot in (1, 2):
+            audio_ref = getattr(request, f"audio_ref{slot}")
+            if audio_ref is not None:
+                legacy_pics[f"audio_ref{slot}"] = audio_ref
 
     message = VideoMessage(
         videoid=request.videoid,

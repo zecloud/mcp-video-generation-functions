@@ -26,6 +26,53 @@ dedicated queues.
 - `get_music_video_result` mirrors `get_hd_video_result` for music video
   workflows.
 
+### Paired voice references (`create_hd_video`, MSR V2)
+
+`audio_ref1` and `audio_ref2` are optional **exact blob filenames**, paired with
+`ref_speaker1_filename` and `ref_speaker2_filename` respectively. Prepare the
+images and voice files beforehand in `fluxjob/agentvideo/{videoid}/`; this tool
+neither uploads nor generates them. WAV is recommended. No extension is added
+to audio filenames (unlike extensionless image names, which gain `.png`). Paths,
+URLs and surrounding whitespace are rejected; filenames retain their case and
+extension. The worker rejects missing images or voice files for voiced jobs.
+
+```json
+{
+  "videoid": "video-42",
+  "ref_speaker1_filename": "alice",
+  "ref_speaker2_filename": "bob.jpg",
+  "audio_ref2": "bob.wav",
+  "prompts": ["Alice listens while Bob speaks to her."]
+}
+```
+
+This emits `pic1="alice.png"`, `pic2="bob.jpg"`, `audio_ref2="bob.wav"`.
+Image 1 stays present and non-vocal: voice 2 is never moved to slot 1. With
+reference descriptions supplied, the same association is emitted instead as
+`references[1].audio_ref`; all provided images still require non-empty prompts.
+The message never mixes `references[]` with `audio_ref1/2` (even null keys), nor
+voiced `references[]` with legacy picture/background keys. Absent/null voices
+are omitted, preserving historical visual messages.
+
+Only subjects 1/2 may have voices. Subjects 3/4 and the background remain
+non-vocal; at most five effective images are allowed with voices. In legacy
+`picN` mode, voiced jobs require contiguous `pic1..picN` (so image 4 requires
+image 3); existing visual-only requests keep their behavior. AVref cannot be
+combined with `sound`, `music_track` or `music_plan`, including reuse plans.
+Music tools do not expose these voice parameters and reject voiced references.
+Removed `reference_audio`, `audio_id_lora`, `audio_id_strength` and
+`audio_id_seconds` remain rejected, even when null, false or empty.
+
+The worker encodes each voice once per job and reuses its stable image slot
+across chunks. It truncates long voices to five seconds without silence-padding
+short voices. No worker LoRA, isolation or chunk-limit controls are added here.
+Callbacks, result JSON, orientation and workflow polling remain unchanged.
+
+This contract targets worker commit
+[`761ca11`](https://github.com/zecloud/func_tts_eurovibe/tree/761ca11/ltx25)
+in zecloud/func_tts_eurovibe#69. Roll out these MCP options only after the V2
+worker is deployed and GPU AVref acceptance is complete; there is no V1 fallback.
+
 ### Music video workflow (`create_music` -> `create_music_video`)
 
 1. Generate the reference images beforehand in

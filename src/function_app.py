@@ -501,6 +501,8 @@ async def create_hd_video(
     ref_speaker4_prompt: str | None = None,
     background_filename: str | None = None,
     background_prompt: str | None = None,
+    audio_ref1: str | None = None,
+    audio_ref2: str | None = None,
 ) -> List[ContentBlock]:
     """Démarre les générations vidéo HD en parallèle et retourne le résultat ou un workflow_id."""
     request = CreateHDVideoInput(
@@ -517,6 +519,8 @@ async def create_hd_video(
         ref_speaker3_prompt=ref_speaker3_prompt,
         ref_speaker4_prompt=ref_speaker4_prompt,
         background_prompt=background_prompt,
+        audio_ref1=audio_ref1,
+        audio_ref2=audio_ref2,
     )
     instance_id = await client.start_new(
         "run_hd_video_orchestrator",
