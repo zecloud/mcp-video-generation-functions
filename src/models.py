@@ -13,8 +13,10 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
+    model_serializer,
     model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
 
 
 KIBIBYTE = 1024
@@ -325,9 +327,97 @@ class VideoMessage(BaseModel):
     seed: int = Field(ge=0, le=2_147_483_647)
 
 
-class TrackSpec(BaseModel):
+class MusicSlider(str, Enum):
+    FEMALE = "female"
+    MALE = "male"
+    POP = "pop"
+    HIPHOP = "hiphop"
+    RNB = "rnb"
+    INDIE_ROCK = "indie-rock"
+    POP_PUNK = "pop-punk"
+    METAL = "metal"
+    COUNTRY = "country"
+    ACOUSTIC_FOLK = "acoustic-folk"
+    HOUSE = "house"
+    DISCO_FUNK = "disco-funk"
+    KPOP = "kpop"
+    REGGAETON = "reggaeton"
+    AFROBEATS = "afrobeats"
+    LOFI = "lofi"
+
+
+class Yue2Controls(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    lora: MusicLora | None = Field(
+        default=None,
+        description=(
+            'LoRA appliqué à la génération ; "none" utilise le modèle de base '
+            "sans LoRA. Champ absent ou null : preset two_steps_from_hell "
+            "par défaut côté Yue2."
+        ),
+    )
+
+    slider: MusicSlider | None = Field(
+        default=None,
+        description=(
+            "Un seul slider natif YuE2 expérimental particle-gmix-1600-v2 ; "
+            'absent ou null : aucun. Exige lora="none" explicite, même à force 0, '
+            "et YUE2_ENABLE_SLIDERS=true côté worker (non configurable ici)."
+        ),
+    )
+    # None marque l'omission en interne ; un null explicite est refusé avant
+    # conversion et ne doit pas figurer comme valeur autorisée dans le schéma.
+    slider_strength: Annotated[
+        float, Field(ge=0, le=1, allow_inf_nan=False)
+    ] | SkipJsonSchema[None] = Field(
+        default=None,
+        json_schema_extra=lambda schema: schema.pop("default", None),
+        description=(
+            "Force du slider : nombre JSON fini dans [0,1], ni booléen ni chaîne "
+            "ni null. Exige un slider sélectionné. Si omise, le worker utilise 1 ; "
+            "0 conserve la sélection sans charger/appliquer le slider."
+        ),
+    )
+
+    @field_validator("lora", mode="before")
+    @classmethod
+    def parse_lora(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return MusicLora(value)
+            except ValueError:
+                return value
+        return value
+
+    @field_validator("slider", mode="before")
+    @classmethod
+    def parse_slider(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return MusicSlider(value)
+            except ValueError:
+                return value
+        return value
+
+    @field_validator("slider_strength", mode="before")
+    @classmethod
+    def validate_slider_strength(cls, value: Any) -> Any:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("slider_strength doit être un nombre JSON fini dans [0,1].")
+        return value
+
+    @model_validator(mode="after")
+    def validate_slider_selection(self) -> "Yue2Controls":
+        if self.slider is None:
+            if "slider_strength" in self.model_fields_set:
+                raise ValueError("slider_strength exige un slider sélectionné.")
+        elif self.lora is not MusicLora.NONE:
+            raise ValueError('Un slider exige lora="none" explicite ; aucun empilement.')
+        return self
+
+
+class TrackSpec(Yue2Controls):
     style: NonEmptyString = Field(
         description=(
             "Style musical du morceau "
@@ -341,24 +431,6 @@ class TrackSpec(BaseModel):
             "sans voix."
         )
     )
-    lora: MusicLora | None = Field(
-        default=None,
-        description=(
-            'LoRA appliqué à la génération ; "none" utilise le modèle de base '
-            "sans LoRA. Champ absent ou null : preset two_steps_from_hell "
-            "par défaut côté Yue2."
-        ),
-    )
-
-    @field_validator("lora", mode="before")
-    @classmethod
-    def parse_lora(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            try:
-                return MusicLora(value)
-            except ValueError:
-                return value
-        return value
 
 
 class CreateMusicInput(BaseModel):
@@ -374,8 +446,14 @@ class CreateMusicInput(BaseModel):
         max_length=MAX_TRACKS,
         description=(
             "Liste non vide des morceaux à générer ; chaque morceau porte son "
-            "style, ses paroles et son LoRA optionnel, et donne lieu à une "
-            "génération parallèle."
+            "style, ses paroles, son LoRA optionnel et un éventuel slider natif "
+            'YuE2 (slider + slider_strength ; lora="none" obligatoire), et donne '
+            "lieu à une génération parallèle. IDs slider : "
+            + ", ".join(slider.value for slider in MusicSlider)
+            + ". slider absent/null : aucun ; slider_strength ne doit être fourni "
+            "qu'avec un slider, nombre JSON fini [0,1] (ni booléen, chaîne ou null), "
+            "défaut worker 1 si omis, 0 sans application. Toute sélection exige "
+            "YUE2_ENABLE_SLIDERS=true côté worker ; réservé à YuE2."
         ),
     )
 
@@ -400,13 +478,10 @@ class CreateMusicInput(BaseModel):
             )
 
         for index, track in enumerate(self.tracks):
-            message_content: dict[str, Any] = {
+            message_content = {
                 "videoid": self.videoid,
-                "style": track.style,
-                "lyrics": track.lyrics,
+                **track.model_dump(mode="json", exclude_none=True),
             }
-            if track.lora is not None:
-                message_content["lora"] = track.lora.value
             user_content_size = len(
                 json.dumps(
                     message_content,
@@ -435,13 +510,10 @@ class GetMusicResultInput(BaseModel):
     )
 
 
-class MusicMessage(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class MusicMessage(Yue2Controls):
     videoid: NonEmptyString
     style: NonEmptyString
     lyrics: NonEmptyString
-    lora: MusicLora | None = None
     type_prefix: NonEmptyString
     instance_id: NonEmptyString
     event_key: NonEmptyString
@@ -1141,11 +1213,42 @@ class HDVideoWorkflowOutput(BaseModel):
     generations: list[GenerationResult]
 
 
+YUE2_SLIDER_COMPLETION_FIELDS = (
+    "slider", "slider_strength", "slider_applied", "slider_release",
+    "slider_revision", "slider_load_seconds",
+)
+
+
+class MusicGenerationResult(GenerationResult):
+    slider: MusicSlider | None = None
+    slider_strength: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    slider_applied: bool | None = None
+    slider_release: str | None = None
+    slider_revision: str | None = None
+    slider_load_seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+    @model_serializer(mode="wrap")
+    def serialize_slider_completion(self, handler, info):
+        data = handler(self)
+        # Un ancien worker n'émet aucun champ slider ; un worker récent peut
+        # explicitement émettre null pour l'identité/provenance sans sélection.
+        for name in YUE2_SLIDER_COMPLETION_FIELDS:
+            if name not in self.model_fields_set:
+                data.pop(name, None)
+            elif (
+                info.exclude_none and getattr(self, name) is None
+                and (info.include is None or name in info.include)
+                and (info.exclude is None or name not in info.exclude)
+            ):
+                data[name] = None
+        return data
+
+
 class MusicWorkflowOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     videoid: NonEmptyString
-    generations: list[GenerationResult]
+    generations: list[MusicGenerationResult]
 
 
 class MusicVideoArtifacts(BaseModel):
