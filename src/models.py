@@ -17,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic.json_schema import SkipJsonSchema
+from video_plan import VideoPlan, decode_video_plan, validate_plan_blob_name
 
 
 KIBIBYTE = 1024
@@ -239,6 +240,24 @@ class CreateHDVideoInput(BaseModel):
         ),
     )
 
+    video_plan: VideoPlan | None = Field(default=None, description="VideoPlan v1 pré-calculé (objet JSON ou chaîne JSON), une seule narration ; frames autoritaires à 24 fps. Upload immuable avant DTS.")
+    backgrounds: list["BackgroundSpec"] | None = Field(default=None, min_length=1, max_length=16, description="Décors ordonnés uniquement avec video_plan ; descriptions égales à plan.locations. Incompatible avec background_filename/background_prompt.")
+
+    @field_validator("video_plan", mode="before")
+    @classmethod
+    def decode_plan(cls, value):
+        return decode_video_plan(value)
+
+    @field_validator("backgrounds", mode="before")
+    @classmethod
+    def decode_backgrounds(cls, value):
+        return _decode_json_object(value)
+
+    def video_plan_blob_name(self) -> str:
+        if self.video_plan is None:
+            raise ValueError("Aucun video_plan à uploader.")
+        return self.video_plan.blob_name()
+
     @field_validator("orientation", mode="before")
     @classmethod
     def parse_orientation(cls, value: Any) -> Any:
@@ -297,8 +316,36 @@ class CreateHDVideoInput(BaseModel):
         return prompts
 
     @model_validator(mode="after")
-    def validate_transport_budgets(self) -> "CreateHDVideoInput":
-        request_size = len(self.model_dump_json(exclude_none=True).encode("utf-8"))
+    def validate_transport_budgets(self, info) -> "CreateHDVideoInput":
+        replay_plan = (info.context or {}).get("video_plan_blob")
+        if replay_plan is not None:
+            validate_plan_blob_name(replay_plan)
+            if len(self.prompts) != 1:
+                raise ValueError("video_plan nécessite exactement un prompt.")
+        if self.video_plan is not None:
+            if len(self.prompts) != 1:
+                raise ValueError("video_plan nécessite exactement un prompt ; fan-out ambigu.")
+            if self.video_plan.videoid != self.videoid:
+                raise ValueError("video_plan.videoid doit correspondre à videoid.")
+        if self.backgrounds is not None:
+            if self.background_filename is not None or self.background_prompt is not None:
+                raise ValueError("backgrounds et background_filename/background_prompt sont incompatibles.")
+            if self.video_plan is None and replay_plan is None:
+                raise ValueError("backgrounds nécessite video_plan.")
+            if self.video_plan is not None and self.video_plan.locations != [bg.description for bg in self.backgrounds]:
+                raise ValueError("video_plan.locations doit correspondre aux descriptions backgrounds ordonnées.")
+            for filename, prompt, is_background in REFERENCE_FIELDS:
+                if not is_background and getattr(self, filename) is not None and getattr(self, prompt) is None:
+                    raise ValueError("backgrounds nécessite les descriptions de tous les sujets.")
+        elif self.video_plan is not None:
+            expected_locations = [self.background_prompt] if self.background_prompt is not None else []
+            if self.video_plan.locations != expected_locations:
+                raise ValueError("video_plan.locations doit correspondre au décor global décrit.")
+        durable_request = self.model_dump(mode="json", exclude_none=True, exclude={"video_plan"})
+        durable_envelope = {"request": durable_request, "timeout_seconds": 14400}
+        if self.video_plan is not None or replay_plan is not None:
+            durable_envelope["video_plan_blob"] = replay_plan or self.video_plan_blob_name()
+        request_size = len(json.dumps(durable_envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         if request_size > DTS_INPUT_BUDGET_BYTES:
             raise ValueError(
                 f"L’entrée DTS occupe {request_size} octets UTF-8 ; "
@@ -366,6 +413,8 @@ class CreateHDVideoInput(BaseModel):
                 if audio_ref is not None:
                     legacy_payload[f"audio_ref{slot}"] = audio_ref
 
+        if self.backgrounds is not None:
+            references_payload.extend({"file": _ensure_png_when_extensionless(bg.filename), "prompt": bg.description, "is_background": True} for bg in self.backgrounds)
         for index, prompt in enumerate(self.prompts):
             message_content: dict[str, Any] = {
                 "videoid": self.videoid,
@@ -375,6 +424,8 @@ class CreateHDVideoInput(BaseModel):
                 message_content["references"] = references_payload
             else:
                 message_content.update(legacy_payload)
+            if self.video_plan is not None or replay_plan is not None:
+                message_content["video_plan"] = replay_plan or self.video_plan_blob_name()
             _validate_video_reference_payload(message_content)
             user_content = json.dumps(
                 message_content,
@@ -416,8 +467,20 @@ class VideoMessage(BaseModel):
     references: list[ReferenceSpec] | None = None
     audio_ref1: AudioReferenceFilename | None = None
     audio_ref2: AudioReferenceFilename | None = None
+    video_plan: NonEmptyString | None = None
     min_seconds: float | None = None
     max_seconds: float | None = None
+
+    @field_validator("video_plan")
+    @classmethod
+    def validate_plan_name(cls, value):
+        return validate_plan_blob_name(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def reject_plan_bounds(self):
+        if self.video_plan is not None and (self.min_seconds is not None or self.max_seconds is not None):
+            raise ValueError("video_plan est incompatible avec min_seconds/max_seconds.")
+        return self
     width: int = Field(gt=0)
     height: int = Field(gt=0)
     type_prefix: NonEmptyString
@@ -1322,12 +1385,42 @@ class GenerationResult(BaseModel):
     error: str | None = None
 
 
+class HDVideoGenerationResult(GenerationResult):
+    video_plan: str | None = None
+    video_plan_artifact: str | None = None
+    prompts_srt: str | None = None
+    render_metadata: str | None = None
+    fps: int | None = Field(default=None, strict=True, ge=1)
+    duration_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+    rendered_duration_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+    scene_count: int | None = Field(default=None, strict=True, ge=1)
+    chunk_count: int | None = Field(default=None, strict=True, ge=1)
+
+    @field_validator("video_plan")
+    @classmethod
+    def plan_name(cls, value):
+        return validate_plan_blob_name(value) if value is not None else None
+
+    @field_validator("video_plan_artifact", "prompts_srt", "render_metadata")
+    @classmethod
+    def artifact_name(cls, value):
+        return _validate_simple_blob_name(value, "VideoPlan artifact") if value is not None else None
+
+    @model_serializer(mode="wrap")
+    def omit_missing_plan_fields(self, handler):
+        data = handler(self)
+        for name in ("video_plan", "video_plan_artifact", "prompts_srt", "render_metadata", "fps", "duration_seconds", "rendered_duration_seconds", "scene_count", "chunk_count"):
+            if getattr(self, name) is None:
+                data.pop(name, None)
+        return data
+
+
 class HDVideoWorkflowOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     videoid: NonEmptyString
     orientation: Orientation
-    generations: list[GenerationResult]
+    generations: list[HDVideoGenerationResult]
 
 
 YUE2_SLIDER_COMPLETION_FIELDS = (
@@ -1422,3 +1515,6 @@ class NotFoundWorkflowResult(BaseModel):
     status: Literal["not_found"] = "not_found"
     workflow_id: NonEmptyString
     error: NonEmptyString
+
+
+CreateHDVideoInput.model_rebuild()

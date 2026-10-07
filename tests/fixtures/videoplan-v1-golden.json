@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "videoid": "video-plan-contract-42",
+  "fps": 24,
+  "duration_seconds": 10,
+  "total_frames": 241,
+  "locations": ["Studio", "Garden"],
+  "scenes": [
+    {
+      "index": 0,
+      "start": 0,
+      "end": 5,
+      "frames": 121,
+      "prompt": "Alice listens while Bob speaks in the studio. Keep both identities consistent.",
+      "location": "Studio"
+    },
+    {
+      "index": 1,
+      "start": 5,
+      "end": 10,
+      "frames": 121,
+      "prompt": "Alice and Bob walk into the garden. Bob continues speaking with the same voice.",
+      "location": "Garden"
+    }
+  ]
+}

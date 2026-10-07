@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Sequence
 from urllib.parse import quote, urlsplit
 
+from azure.core.exceptions import ResourceExistsError
 from azure.identity.aio import DefaultAzureCredential, ManagedIdentityCredential
 from azure.storage.blob import BlobSasPermissions, ContentSettings, generate_blob_sas
 from azure.storage.blob.aio import BlobServiceClient
@@ -89,11 +90,14 @@ async def upload_media_blob(
     base_url: str,
     content_type: str = "application/octet-stream",
     overwrite: bool = True,
+    verify_existing: bool = False,
     credential_factory: Callable[[], object] = _storage_credential,
     service_client_factory: Callable[..., object] = BlobServiceClient,
 ) -> str:
     """Upload un artefact dans le dossier de travail média et rend son URL."""
 
+    if verify_existing and overwrite:
+        raise ValueError("verify_existing exige overwrite=False.")
     location = media_blob_location(blob_path, base_url)
     credential = credential_factory()
     try:
@@ -105,11 +109,23 @@ async def upload_media_blob(
                 container=location.container_name,
                 blob=location.blob_name,
             )
-            await blob_client.upload_blob(
-                content,
-                overwrite=overwrite,
-                content_settings=ContentSettings(content_type=content_type),
-            )
+            try:
+                await blob_client.upload_blob(
+                    content,
+                    overwrite=overwrite,
+                    content_settings=ContentSettings(content_type=content_type),
+                )
+            except ResourceExistsError:
+                if not verify_existing:
+                    raise
+                properties = await blob_client.get_blob_properties()
+                if properties.size != len(content):
+                    raise ValueError("Le blob immuable existant a un contenu différent.")
+                download = await blob_client.download_blob(
+                    offset=0, length=len(content) + 1
+                )
+                if await download.readall() != content:
+                    raise ValueError("Le blob immuable existant a un contenu différent.")
     finally:
         await _close_credential(credential)
     return location.unsigned_url

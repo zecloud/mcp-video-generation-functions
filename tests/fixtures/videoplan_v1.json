@@ -1,0 +1,1 @@
+{"duration_seconds":10.0,"fps":24,"locations":["Studio","Garden"],"scenes":[{"end":5.0,"frames":121,"index":0,"location":"Studio","prompt":"Alice listens while Bob speaks in the studio.","start":0.0},{"end":10.0,"frames":121,"index":1,"location":"Garden","prompt":"Alice and Bob walk through the garden.","start":5.0}],"schema_version":1,"total_frames":241,"videoid":"video-42"}
