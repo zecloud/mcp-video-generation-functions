@@ -18,7 +18,7 @@ from AzureFunctionsMCPPydanticTool import (
 from mcp.types import ContentBlock, ResourceLink, TextContent
 from pydantic import BaseModel
 
-from media_workflow import run_media_orchestration
+from media_workflow import MEDIA_BLOB_PATH_PREFIX, run_media_orchestration
 from models import (
     BackgroundSpec,
     CompletedMusicVideoWorkflowResult,
@@ -40,6 +40,7 @@ from models import (
     MusicWorkflowOutput,
     TrackSpec,
     VideoMessage,
+    VideoPlan,
     NotFoundWorkflowResult,
     Orientation,
     RunningWorkflowResult,
@@ -114,6 +115,9 @@ ORCHESTRATION_TIMEOUT_SECONDS = _positive_int_setting(
 MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS = _positive_int_setting(
     "MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS", 4 * 60 * 60
 )
+VIDEO_PLAN_ORCHESTRATION_TIMEOUT_SECONDS = _positive_int_setting(
+    "VIDEO_PLAN_ORCHESTRATION_TIMEOUT_SECONDS", 4 * 60 * 60
+)
 VIDEO_BLOB_BASE_URL = os.environ.get(
     "VIDEO_BLOB_BASE_URL",
     "https://storage.example.invalid/video",
@@ -148,6 +152,20 @@ async def _upload_music_plan(
     )
     logging.info("Uploaded music plan %s", blob_path)
     return request.music_plan_blob_name()
+
+
+async def _upload_video_plan(request: CreateHDVideoInput, *, uploader: MediaUploader | None = None) -> str:
+    if request.video_plan is None:
+        raise ValueError("Aucun video_plan à uploader.")
+    if MEDIA_BLOB_PATH_PREFIX != "video/":
+        raise ValueError("VideoPlan v1 nécessite VIDEO_BLOB_PATH_PREFIX=video/.")
+    blob_name = request.video_plan_blob_name()
+    await (uploader or upload_media_blob)(
+        f"{MEDIA_BLOB_PATH_PREFIX}{request.videoid}/{blob_name}",
+        request.video_plan.serialize(), base_url=VIDEO_BLOB_BASE_URL,
+        content_type="application/json", overwrite=False, verify_existing=True,
+    )
+    return blob_name
 
 
 SasUriProvider = Callable[..., Awaitable[dict[str, str]]]
@@ -243,12 +261,32 @@ def _music_analysis_links(output: BaseModel) -> list[ExtraResourceLink]:
     ]
 
 
+def _video_plan_artifact_links(output: BaseModel) -> list[ExtraResourceLink]:
+    if not isinstance(output, HDVideoWorkflowOutput):
+        return []
+    links = []
+    for generation in output.generations:
+        if generation.status != "completed" or not generation.video_plan:
+            continue
+        for field, suffix, mime, description in (
+            ("video_plan_artifact", "videoplan.json", "application/json", "VideoPlan v1 rendu."),
+            ("prompts_srt", "prompts.srt", "application/x-subrip", "Prompts ordonnés et minutés des scènes."),
+            ("render_metadata", "render.json", "application/json", "Métadonnées du rendu : scènes, chunks et durée réelle."),
+        ):
+            name = getattr(generation, field)
+            expected = f"{generation.type_prefix}-{output.videoid}.{suffix}"
+            if name == expected:
+                links.append(ExtraResourceLink(f"{MEDIA_BLOB_PATH_PREFIX}{output.videoid}/{name}", description, mime))
+    return links
+
+
 VIDEO_PROFILE = MediaProfile(
     output_model=HDVideoWorkflowOutput,
     completed_model=CompletedWorkflowResult,
     result_tool="get_hd_video_result",
     mime_type="video/mp4",
     describe=_describe_video,
+    extra_links=_video_plan_artifact_links,
 )
 MUSIC_PROFILE = MediaProfile(
     output_model=MusicWorkflowOutput,
@@ -283,7 +321,8 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
             mode="json"
         )
 
-    request = CreateHDVideoInput.model_validate(orchestration_input["request"])
+    video_plan_blob = orchestration_input.get("video_plan_blob")
+    request = CreateHDVideoInput.model_validate(orchestration_input["request"], context={"video_plan_blob": video_plan_blob})
     instance_id = context.instance_id
 
     def build_dispatch():
@@ -298,6 +337,7 @@ def run_hd_video_orchestrator(context: df.DurableOrchestrationContext):
                 instance_id=instance_id,
                 event_key=event_key,
                 dts_event_name=dts_event_name,
+                video_plan_blob=video_plan_blob,
             )
             descriptors.append(descriptor)
             payloads.append(
@@ -503,6 +543,8 @@ async def create_hd_video(
     background_prompt: str | None = None,
     audio_ref1: str | None = None,
     audio_ref2: str | None = None,
+    video_plan: VideoPlan | None = None,
+    backgrounds: List[BackgroundSpec] | None = None,
 ) -> List[ContentBlock]:
     """Démarre les générations vidéo HD en parallèle et retourne le résultat ou un workflow_id."""
     request = CreateHDVideoInput(
@@ -521,14 +563,17 @@ async def create_hd_video(
         background_prompt=background_prompt,
         audio_ref1=audio_ref1,
         audio_ref2=audio_ref2,
+        video_plan=video_plan,
+        backgrounds=backgrounds,
     )
-    instance_id = await client.start_new(
-        "run_hd_video_orchestrator",
-        client_input={
-            "request": request.model_dump(mode="json", exclude_none=True),
-            "timeout_seconds": ORCHESTRATION_TIMEOUT_SECONDS,
-        },
-    )
+    client_input = {
+        "request": request.model_dump(mode="json", exclude_none=True, exclude={"video_plan"}),
+        "timeout_seconds": ORCHESTRATION_TIMEOUT_SECONDS,
+    }
+    if request.video_plan is not None:
+        client_input["video_plan_blob"] = await _upload_video_plan(request)
+        client_input["timeout_seconds"] = VIDEO_PLAN_ORCHESTRATION_TIMEOUT_SECONDS
+    instance_id = await client.start_new("run_hd_video_orchestrator", client_input=client_input)
     logging.info("Started HD video orchestration %s", instance_id)
     result = await _wait_for_workflow(
         client,

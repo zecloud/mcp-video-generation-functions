@@ -21,6 +21,7 @@ from models import (
     VideoMessage,
     Orientation,
     ReferenceSpec,
+    HDVideoGenerationResult,
 )
 
 __all__ = [
@@ -69,6 +70,7 @@ def build_generation(
     instance_id: str,
     event_key: str,
     dts_event_name: str,
+    video_plan_blob: str | None = None,
 ) -> tuple[GenerationDescriptor, VideoMessage]:
     prompt = request.prompts[index]
     width, height = ORIENTATION_DIMENSIONS[request.orientation]
@@ -114,11 +116,17 @@ def build_generation(
             if audio_ref is not None:
                 legacy_pics[f"audio_ref{slot}"] = audio_ref
 
+    if request.backgrounds is not None:
+        references.extend(ReferenceSpec(file=ensure_png_when_extensionless(bg.filename), prompt=bg.description, is_background=True) for bg in request.backgrounds)
+    plan_blob = video_plan_blob or (request.video_plan_blob_name() if request.video_plan else None)
+    if plan_blob is not None and (len(request.prompts) != 1 or index != 0):
+        raise ValueError("video_plan nécessite exactement une génération.")
     message = VideoMessage(
         videoid=request.videoid,
         prompt=prompt,
         **legacy_pics,
         references=references,
+        video_plan=plan_blob,
         width=width,
         height=height,
         type_prefix=type_prefix,
@@ -145,5 +153,16 @@ def aggregate_generation_results(
             descriptors=descriptors,
             event_payloads=event_payloads,
             timed_out_indexes=timed_out_indexes,
+            result_model=HDVideoGenerationResult,
+            completed_fields=video_plan_completed_fields,
         ),
     )
+
+
+def video_plan_completed_fields(payload):
+    if not payload.get("video_plan"):
+        return {}
+    return {field: payload[field] for field in (
+        "video_plan", "video_plan_artifact", "prompts_srt", "render_metadata",
+        "fps", "duration_seconds", "rendered_duration_seconds", "scene_count", "chunk_count"
+    ) if field in payload}

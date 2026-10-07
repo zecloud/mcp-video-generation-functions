@@ -73,6 +73,122 @@ This contract targets worker commit
 in zecloud/func_tts_eurovibe#69. Roll out these MCP options only after the V2
 worker is deployed and GPU AVref acceptance is complete; there is no V1 fallback.
 
+### Narrative VideoPlan v1 (`create_hd_video`)
+
+`video_plan` optionally supplies a precomputed, **non-musical** narrative plan.
+It accepts a JSON object or its JSON-encoded string, never a blob name or reuse
+flag. Keep exactly **one** entry in `prompts`: the global narration remains
+unchanged, but the worker uses the ordered scene prompts directly without LLM
+scene splitting. A plan with multiple prompts is rejected rather than silently
+fan-out or reuse the same plan across independent videos. Without a plan,
+historical fan-out, references, voices, outputs and the 2-hour timeout remain
+unchanged.
+
+```json
+{
+  "videoid": "video-42",
+  "ref_speaker1_filename": "alice",
+  "ref_speaker2_filename": "bob.jpg",
+  "ref_speaker1_prompt": "Alice",
+  "ref_speaker2_prompt": "Bob",
+  "audio_ref2": "Bob.wav",
+  "prompts": ["A complete narrative."],
+  "backgrounds": [
+    {"filename": "studio", "description": "Studio"},
+    {"filename": "garden.png", "description": "Garden"}
+  ],
+  "video_plan": {
+    "schema_version": 1,
+    "videoid": "video-42",
+    "fps": 24,
+    "duration_seconds": 10.0,
+    "total_frames": 241,
+    "locations": ["Studio", "Garden"],
+    "scenes": [
+      {"index": 0, "start": 0.0, "end": 5.0, "frames": 121,
+       "prompt": "Alice listens while Bob speaks in the studio.", "location": "Studio"},
+      {"index": 1, "start": 5.0, "end": 10.0, "frames": 121,
+       "prompt": "Alice and Bob walk through the garden.", "location": "Garden"}
+    ]
+  }
+}
+```
+
+The canonical example is also `tests/fixtures/videoplan_v1.json` (SHA256
+`d1afb96608a80d5bc871ddba01a937aa197bbd5e01e40344a325fd37e20f36f1`).
+The independently supplied cross-repository fixture is copied unchanged at
+`tests/fixtures/videoplan-v1-golden.json` (source SHA256
+`853499b120585835968fcd92eca280e40525c4ef469f688f044057d6467ed5e8`).
+MCP normalizes timeline numbers to floats and uploads canonical bytes, whose
+SHA256 is `3a365a6e14368b567a97fa76aefaa1a25160499eb4c37386ab7cb6c83f90e40f`.
+The worker verifies the bytes actually downloaded, not a reserialization of the
+source fixture. The strict standalone decoder is
+`video_plan.VideoPlan.from_json(bytes_or_string)`; `serialize()` returns the
+canonical upload bytes and `blob_name()` includes their full SHA256.
+Validation rejects unknown fields, booleans/coerced numeric integers, non-finite
+numbers, duplicate JSON keys, non-contiguous indexes and inconsistent timings.
+Only integer `fps=24` and `schema_version=1` are supported. Limits: 512 scenes,
+16 described backgrounds, 3600 interval seconds and 4 MiB canonical UTF-8 JSON.
+These are validation limits, **not GPU throughput guarantees**.
+
+Frames are authoritative: each scene has at least 9 frames on the `8k+1` grid;
+`start=sum(previous frames-1)/24`, `end=start+(frames-1)/24`,
+`total_frames=1+sum(frames-1)` and `duration_seconds=(total_frames-1)/24`.
+Timing comparisons use absolute tolerance `1e-6` seconds. The worker expands
+large scenes into deterministic chunks, repeats their scene prompt and removes
+one shared frame at every join. The final MP4 contains `total_frames` frames:
+its rendered duration is **`duration_seconds + 1/24`**, reported separately as
+`rendered_duration_seconds`.
+
+`backgrounds` is available only with a plan (also accepts a JSON string), and
+cannot be mixed with `background_filename`/`background_prompt`. Every supplied
+subject image needs its visual description in this mode. `locations` must
+exactly match the ordered background descriptions; with multiple locations,
+each scene must select an exact `location`. With one described global background,
+its location may be omitted per scene. With no described background, use
+`locations=[]` and omit scene locations. A legacy background without description
+remains a global visual reference. Subject and voice slots remain global and
+stable; `audio_ref2` never moves to slot 1, backgrounds cannot carry voices, and
+voiced jobs still have at most five total reference images. No per-scene identity,
+voice override, TTS synthesis or musical soundtrack is introduced.
+
+Before Durable orchestration, MCP uploads canonical sorted-key compact JSON
+(`ensure_ascii=False`, `allow_nan=False`) to
+`video/{videoid}/{videoid}-<full-sha256>.videoplan.json`. Upload uses create-only
+storage semantics; concurrent identical requests verify existing bytes, whereas
+a conflicting blob fails without overwrite or starting a workflow. Durable
+input excludes the plan and carries `video_plan_blob`; Service Bus carries only
+`video_plan=<simple blob name>`, with the existing correlation/reference fields.
+The separate plan budget does not consume the DTS 960 KiB or Service Bus 252 KiB
+budgets (including their existing safety margins).
+
+A successful compatible worker reports `video_plan`, `video_plan_artifact`,
+`prompts_srt`, `render_metadata`, `fps`, `duration_seconds`,
+`rendered_duration_seconds`, `scene_count` and `chunk_count`. The completed HD
+result preserves these optional fields and provides SAS links for reported
+`{type_prefix}-{videoid}.videoplan.json`, `.prompts.srt` and `.render.json` beside
+the MP4. Missing metadata from an old worker never invents artifact links;
+failed/timed-out jobs never advertise completed artifacts. There is no dialogue
+SRT: the plan contains scene prompts, not independently synthesized dialogue.
+
+**Deployment prerequisites (not provisioned or verified here):** deploy the
+compatible LTX worker before using this option; its existing `VoiceStorage`
+account must match the account targeted by MCP `VIDEO_BLOB_BASE_URL` and permit
+reading/writing the `video` container. VideoPlan v1 requires
+`VIDEO_BLOB_PATH_PREFIX=video/`; plan, MP4 and sidecars live directly in
+`video/{videoid}/` without any assumed bridge. Images and voice references
+**stay in `fluxjob/agentvideo/{videoid}/`**, as for historical video jobs.
+MusicPlan storage and historical worker bindings are unchanged. GPU acceptance,
+account/container mapping, permissions and end-to-end downloads require separate
+verification before rollout.
+
+Only plan requests use `VIDEO_PLAN_ORCHESTRATION_TIMEOUT_SECONDS` (default
+14400 seconds / 4 hours), configurable independently of the historical
+`ORCHESTRATION_TIMEOUT_SECONDS` (7200). Increase the plan timeout deliberately
+for long renders after measuring GPU capacity; a one-hour validated plan is
+not guaranteed to render within the default deadline. No Azure setting, RBAC,
+infrastructure or deployment is changed by this implementation.
+
 ### Music video workflow (`create_music` -> `create_music_video`)
 
 1. Generate the reference images beforehand in
