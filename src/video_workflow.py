@@ -86,7 +86,7 @@ def build_generation(
     legacy_keys = ("pic1", "pic2", "pic3", "pic4", "background")
     references: list[ReferenceSpec] | None = None
     legacy_pics: dict[str, str] = {}
-    uses_references = any(
+    uses_references = request.backgrounds is not None or any(
         getattr(request, prompt_field) is not None
         for _, prompt_field, _ in REFERENCE_FIELDS
     )

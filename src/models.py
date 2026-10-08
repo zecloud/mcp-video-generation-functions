@@ -154,15 +154,17 @@ class CreateHDVideoInput(BaseModel):
     videoid: NonEmptyString = Field(
         description="Identifiant du dossier de travail vidéo existant."
     )
-    ref_speaker1_filename: NonEmptyString = Field(
+    ref_speaker1_filename: NonEmptyString | None = Field(
+        default=None,
         description=(
-            "Nom du fichier de référence du premier intervenant. "
+            "Nom du fichier de référence du premier intervenant (optionnel). "
             "L'extension .png est ajoutée si elle est absente."
         )
     )
-    ref_speaker2_filename: NonEmptyString = Field(
+    ref_speaker2_filename: NonEmptyString | None = Field(
+        default=None,
         description=(
-            "Nom du fichier de référence du second intervenant. "
+            "Nom du fichier de référence du second intervenant (optionnel). "
             "L'extension .png est ajoutée si elle est absente."
         )
     )
@@ -200,7 +202,7 @@ class CreateHDVideoInput(BaseModel):
         default=None,
         description=(
             "Description visuelle du second intervenant. "
-            "Obligatoire dès qu'un prompt de référence est fourni."
+            "Obligatoire si ref_speaker2_filename est fourni en mode references[]."
         ),
     )
     ref_speaker3_prompt: NonEmptyString | None = Field(
@@ -283,7 +285,7 @@ class CreateHDVideoInput(BaseModel):
         description=(
             "Nom exact du blob vocal associé à ref_speaker2_filename dans "
             "fluxjob/agentvideo/{videoid}/ (optionnel, WAV recommandé). "
-            "Peut être fourni sans audio_ref1 ; les deux images restent présentes."
+            "Peut être fourni sans audio_ref1 ; les images 1 et 2 sont requises."
         ),
     )
 
@@ -317,6 +319,14 @@ class CreateHDVideoInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_transport_budgets(self, info) -> "CreateHDVideoInput":
+        voiced = any(getattr(self, f"audio_ref{slot}") is not None for slot in (1, 2))
+        if voiced:
+            for slot in (1, 2):
+                if getattr(self, f"audio_ref{slot}") is not None and getattr(self, f"ref_speaker{slot}_filename") is None:
+                    raise ValueError(f"audio_ref{slot} nécessite ref_speaker{slot}_filename.")
+            last_voiced_slot = max(slot for slot in (1, 2) if getattr(self, f"audio_ref{slot}") is not None)
+            if any(getattr(self, f"ref_speaker{slot}_filename") is None for slot in range(1, last_voiced_slot + 1)):
+                raise ValueError("Les images AVref doivent être contiguës avant chaque voix ; les voix ne peuvent pas être déplacées.")
         replay_plan = (info.context or {}).get("video_plan_blob")
         if replay_plan is not None:
             validate_plan_blob_name(replay_plan)
@@ -358,7 +368,7 @@ class CreateHDVideoInput(BaseModel):
             if getattr(self, filename_field) is not None
             or getattr(self, prompt_field) is not None
         ]
-        uses_references = any(
+        uses_references = self.backgrounds is not None or any(
             getattr(self, prompt_field) is not None
             for _, prompt_field, _ in provided
         )
@@ -389,13 +399,11 @@ class CreateHDVideoInput(BaseModel):
                     ),
                     "prompt": getattr(self, prompt_field),
                     "is_background": is_background,
+                    **({"audio_ref": getattr(self, "audio_ref1")} if filename_field == "ref_speaker1_filename" and self.audio_ref1 is not None else {}),
+                    **({"audio_ref": getattr(self, "audio_ref2")} if filename_field == "ref_speaker2_filename" and self.audio_ref2 is not None else {}),
                 }
                 for filename_field, prompt_field, is_background in provided
             ]
-            for slot in (1, 2):
-                audio_ref = getattr(self, f"audio_ref{slot}")
-                if audio_ref is not None:
-                    references_payload[slot - 1]["audio_ref"] = audio_ref
         else:
             legacy_payload = {}
             legacy_keys = ("pic1", "pic2", "pic3", "pic4", "background")
