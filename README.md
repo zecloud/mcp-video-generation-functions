@@ -26,6 +26,31 @@ dedicated queues.
 - `get_music_video_result` mirrors `get_hd_video_result` for music video
   workflows.
 
+### Optional visual references (`create_hd_video`)
+
+Only `videoid` and `prompts` are required. All four subject filenames, including
+`ref_speaker1_filename` and `ref_speaker2_filename`, are optional and default to
+`null` in the Pydantic input and Python handler. This applies both with and
+without `video_plan`: zero or one subject, a global background alone, and
+VideoPlan `backgrounds` without subjects are supported by a compatible worker.
+Omitted references are not replaced by synthetic identities. With zero subject
+references, character identity is not visually fixed; this option does not
+create or clone a voice automatically.
+
+In described `references[]` mode, only supplied image files need their matching
+non-empty descriptions; a description without its image is rejected. Ordered
+VideoPlan backgrounds also select this mode, even when there are no subjects.
+A visual-only second image may be supplied without the first. A voice always
+requires its corresponding image, and earlier subject slots up to that voice
+must be present: `audio_ref2` needs both images 1 and 2, while `audio_ref1` can
+be used with image 1 alone. Missing earlier images cannot silently move voice 2
+to subject 1. Existing legacy voiced image-contiguity and reference limits remain
+in force. Music-video inputs keep their separate required-performer contract.
+
+The locally registered MCP tool metadata marks both filenames optional. Already
+deployed tool schemas do not change until this MCP fix and a worker supporting
+zero references are deployed; no deployment is performed by these changes.
+
 ### Paired voice references (`create_hd_video`, MSR V2)
 
 `audio_ref1` and `audio_ref2` are optional **exact blob filenames**, paired with

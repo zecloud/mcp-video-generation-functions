@@ -529,9 +529,9 @@ def enqueue_music_video_generation(job: dict, message: func.Out[str]) -> dict:
 async def create_hd_video(
     client: df.DurableOrchestrationClient,
     videoid: str,
-    ref_speaker1_filename: str,
-    ref_speaker2_filename: str,
     prompts: List[str],
+    ref_speaker1_filename: str | None = None,
+    ref_speaker2_filename: str | None = None,
     orientation: Orientation = Orientation.VERTICAL,
     ref_speaker1_prompt: str | None = None,
     ref_speaker2_prompt: str | None = None,
