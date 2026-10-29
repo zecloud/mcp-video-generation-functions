@@ -1360,6 +1360,88 @@ class MusicVideoMessage(BaseModel):
         return self
 
 
+class MusicVideoStageMessage(MusicVideoMessage):
+    """Protocole interne du fan-out musical, indépendant du contrat MCP."""
+
+    music_video_contract: Literal[1] = 1
+    music_video_stage: Literal["prepare", "scene", "assemble"]
+    render_id: NonEmptyString
+    music_plan_source: Literal["mcp", "legacy"]
+    plan_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    music_scene_index: int | None = Field(default=None, ge=0, strict=True)
+
+    @field_validator("music_video_contract", mode="before")
+    @classmethod
+    def strict_contract_version(cls, value: Any) -> Any:
+        if type(value) is not int:
+            raise ValueError("music_video_contract doit être un entier strict.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_stage(self) -> "MusicVideoStageMessage":
+        if self.music_video_stage == "prepare":
+            if self.music_scene_index is not None or self.plan_sha256 is not None:
+                raise ValueError("prepare ne reçoit ni index ni digest de scène.")
+            if self.music_plan_source == "mcp" and not isinstance(self.music_plan, str):
+                raise ValueError("prepare source=mcp exige un nom de blob music_plan.")
+        else:
+            if (
+                not isinstance(self.music_plan, str)
+                or self.music_plan_source != "mcp"
+                or self.plan_sha256 is None
+            ):
+                raise ValueError("scene/assemble exigent un snapshot MCP et son SHA256.")
+            if (self.music_video_stage == "scene") != (self.music_scene_index is not None):
+                raise ValueError("music_scene_index est requis uniquement pour scene.")
+        expected_prefix = self.render_id
+        if self.music_scene_index is not None:
+            expected_prefix += f"-scene-{self.music_scene_index:04d}"
+        if self.type_prefix != expected_prefix:
+            raise ValueError("type_prefix ne correspond pas au render_id/index.")
+        return self
+
+
+class MusicVideoPreparedScene(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    index: int = Field(ge=0)
+    frames: int = Field(ge=9)
+
+    @field_validator("frames")
+    @classmethod
+    def frame_grid(cls, value: int) -> int:
+        if (value - 1) % MUSIC_PLAN_FRAME_GRID:
+            raise ValueError("frames doit respecter la grille 8k+1.")
+        return value
+
+
+class MusicVideoPreparation(BaseModel):
+    """Manifest compact ; les prompts et le plan complet restent dans Blob."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    music_plan: NonEmptyString
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    fps: int = Field(gt=0, le=240)
+    total_frames: int = Field(ge=9)
+    scenes: list[MusicVideoPreparedScene] = Field(
+        min_length=1, max_length=MAX_MUSIC_PLAN_SCENES
+    )
+
+    @field_validator("music_plan")
+    @classmethod
+    def plan_name(cls, value: str) -> str:
+        return _validate_simple_blob_name(value, "music_plan")
+
+    @model_validator(mode="after")
+    def validate_manifest(self) -> "MusicVideoPreparation":
+        if [scene.index for scene in self.scenes] != list(range(len(self.scenes))):
+            raise ValueError("Le manifest doit être indexé et ordonné depuis 0.")
+        if self.total_frames != 1 + sum(scene.frames - 1 for scene in self.scenes):
+            raise ValueError("total_frames incohérent avec les scènes du manifest.")
+        return self
+
+
 class GenerationDescriptor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

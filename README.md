@@ -19,10 +19,11 @@ dedicated queues.
   native YuE2 `slider` / `slider_strength` controls) and runs the same
   fan-out/fan-in orchestration on the YuE2 music queue.
 - `get_music_result` mirrors `get_hd_video_result` for music workflows.
-- `create_music_video` validates `CreateMusicVideoInput` and starts one
-  "music video" generation on the video queue (`VIDEO_SERVICE_BUS_QUEUE_NAME`,
-  same ltx25 worker as `create_hd_video`). It turns a song produced by
-  `create_music` into a clip.
+- `create_music_video` validates `CreateMusicVideoInput`, prepares a frozen
+  MusicPlan, fans out one silent LTX25 generation per scene, then fans in to a
+  CPU assembly/remux job on the video queue (`VIDEO_SERVICE_BUS_QUEUE_NAME`,
+  same worker as `create_hd_video`). This is the default, with hard cuts only
+  and no transition keyframes. Its public result still contains one final clip.
 - `get_music_video_result` mirrors `get_hd_video_result` for music video
   workflows.
 
@@ -203,7 +204,8 @@ reading/writing the `video` container. VideoPlan v1 requires
 `VIDEO_BLOB_PATH_PREFIX=video/`; plan, MP4 and sidecars live directly in
 `video/{videoid}/` without any assumed bridge. Images and voice references
 **stay in `fluxjob/agentvideo/{videoid}/`**, as for historical video jobs.
-MusicPlan storage and historical worker bindings are unchanged. GPU acceptance,
+Historical music storage and worker bindings are unchanged; staged MusicPlan
+snapshots use the explicit music-video mapping below. GPU acceptance,
 account/container mapping, permissions and end-to-end downloads require separate
 verification before rollout.
 
@@ -266,10 +268,111 @@ infrastructure or deployment is changed by this implementation.
    `music_plan.locations[i] == backgrounds[i].description`, one reference image
    per location.
 
-Rendering is slow: expect about 29 minutes of GPU time per minute of song
-(~40 minutes for an 83-second song). The workflow therefore has its own
-timeout, `MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS` (4 hours by default, i.e.
-songs up to roughly 8 minutes); poll with `get_music_video_result`.
+Rendering is slow: the historical estimate is about 29 minutes of aggregate GPU
+time per minute of song (~40 minutes for an 83-second song). Fan-out can reduce
+wall-clock time only with enough independently available worker/GPU capacity;
+queue order does not guarantee execution order. The workflow has one global
+timeout, `MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS` (4 hours by default),
+covering preparation, scene dispatch/results and assembly, not four hours per
+stage. Poll with `get_music_video_result`.
+
+#### LTX25 scene worker integration (internal contract v1)
+
+New music-video workflows always use `music_video_contract=1` and
+`music_video_stage="prepare" | "scene" | "assemble"` on the existing video
+queue. No opt-in or monolithic fallback is exposed. HD video, narrative
+VideoPlan and YuE2 generation messages are unchanged. A compatible worker must
+implement all three stages before rollout; no deployment or GPU acceptance is
+performed here.
+
+**Durable rollout compatibility:** new `create_music_video` calls start
+`run_music_video_orchestrator_v2`, which dispatches only through
+`enqueue_music_video_generation_v2`. Keep the original
+`run_music_video_orchestrator` and `enqueue_music_video_generation` registered
+for in-flight monolithic workflows: they retain their original unversioned
+message schema, deterministic UUIDs, `music-video-0-<uuid>` callbacks and
+terminal timeout continuations. Existing instances are not migrated to staged
+execution, and polling remains unchanged for both versions. Workers must
+continue accepting legacy music messages alongside staged v1 messages until
+those old instances and pending queue deliveries have drained; do not remove
+the legacy functions before that drain is confirmed.
+
+Every message retains the existing `videoid`, `music_track`, `references`,
+`width`, `height`, `type_prefix`, `instance_id`, `event_key`, `dts_event_name`,
+`seed` and supplied music options. `render_id` is the final music-video
+`type_prefix`, stable for the lifetime of the Durable instance. A scene adds
+`music_scene_index` (the original zero-based plan index) and has
+`type_prefix="{render_id}-scene-{music_scene_index:04d}"`. Both scene index and
+correlation keys remain unchanged when dispatch is sorted by decreasing frame
+count (ties by increasing index). The full plan/prompts never enter DTS input,
+Service Bus messages or callback history; preparation returns only a compact
+manifest.
+
+| Stage | Additional input | Required successful callback fields |
+|---|---|---|
+| `prepare` | `music_plan_source="mcp"` for an uploaded `music_plan` filename; otherwise `"legacy"` with `music_plan=true` for reuse or no plan for construction | `music_plan` (immutable snapshot filename), `plan_sha256` (64 lowercase hex characters), integer `fps`, `total_frames`, `scenes=[{"index":0,"frames":49}, ...]` |
+| `scene` | `music_plan=<snapshot>`, `music_plan_source="mcp"`, `plan_sha256`, `music_scene_index` | integer `music_scene_index`, integer `num_frames` equal to that scene's `frames` |
+| `assemble` | `music_plan=<snapshot>`, `music_plan_source="mcp"`, `plan_sha256`; no scene index, `type_prefix=render_id` | `music_plan=<same snapshot>`, integer `num_frames=total_frames` |
+
+All callbacks also require `status="completed"` and the exact `event_key`,
+raised against the supplied `instance_id` / `dts_event_name`. Failure uses the
+existing `status="failed"`, `error`, optional `retryable=true` contract.
+`run_media_orchestration` awaits retries on that same event without re-enqueueing
+the job; the worker's existing Service Bus retry/redelivery mechanism owns
+execution retries. Wrong correlation, malformed manifests, mismatched scene
+indices/frame counts, terminal failures or timeouts prevent assembly. No
+successful scene is dispatched again within the workflow, including DTS replay.
+The public failed/timeout generation identifies unfinished scene indices;
+completed scenes stay in Blob and must not be deleted on partial failure.
+A separate `create_music_video` call is a new render, not an implicit resume.
+
+Preparation must freeze the exact validated MusicPlan v1 before returning.
+The manifest is ordered/indexed `0..n-1`, has the existing MusicPlan scene limit,
+each `frames >= 9` is on the `8k+1` grid and
+`total_frames = 1 + sum(frames - 1)`. It validates `videoid`, `music_track`,
+references/location matching and actual song duration, then creates/verifies an
+immutable snapshot and returns its SHA256 over the downloaded bytes. Subsequent
+stages validate that same digest and identity, never regenerate the plan.
+
+Storage mapping is explicit: MCP-uploaded plans live in
+`video/{videoid}/`; historical worker songs and reusable plans live in
+`ltxavatarjob/agentvideo/{videoid}/` on the worker's `VoiceStorage` account.
+YuE2 currently produces `.musicanalysis.json`, **not** a prompted MusicPlan.
+Without an explicit/reused plan, `prepare` constructs MusicPlan with the existing
+LTX builder, reusing that YuE2 analysis. Its existing Demucs/Whisper fallback
+can still require GPU when no reusable analysis exists; preparation must not
+load the LTX renderer. Image references remain in
+`fluxjob/agentvideo/{videoid}/`. The worker must read MCP plans from `video/`
+when source is `"mcp"`, and freeze snapshots back into `video/{videoid}/`.
+Music fan-out v1 requires `VIDEO_BLOB_PATH_PREFIX=video/` and matching storage
+accounts/permissions between `VIDEO_BLOB_BASE_URL` and `VoiceStorage`; it does
+not reuse the non-musical VideoPlan decoder.
+
+Each scene renders independently, using its plan prompt/references/frames,
+without cross-scene latent/keyframe carryover and **without audio**, to
+`video/{videoid}/{render_id}-scene-{index:04d}-{videoid}.mp4`.
+Scene callbacks occur only after a verified durable upload. Worker receipts
+must key on render ID, snapshot digest and scene index (and validate the
+effective rendering inputs), so duplicate deliveries or retries after an upload
+reuse the finished clip and resend its callback rather than consuming GPU
+again. The same idempotency is required for preparation and final assembly;
+output existence alone is not proof of a matching completed render.
+
+Only after every scene succeeds does MCP enqueue `assemble`. It derives the
+ordered scene filenames from the snapshot/render ID, validates all receipts and
+clips, and runs on **CPU without loading LTX/CUDA**. Keep the first scene's
+frames and drop the first frame from each subsequent scene to honor the existing
+`1 + sum(frames - 1)` contract, using hard cuts with no interpolation or fades.
+Concatenate in plan order, not completion order, then remux the original full
+song exactly once (no generated/per-scene audio). Publish the final MP4 under
+the unchanged final prefix and the historical
+`{music_track}-{videoid}.musicplan.json`, `.scenes.srt`, `.prompts.srt` sidecars
+in `video/{videoid}/`, then signal completion. Those canonical sidecar links and
+the single final `generations[0]` preserve `create_music_video` /
+`get_music_video_result`; intermediate scene clips are not public generations.
+Also copy the canonical `.musicplan.json` to the historical
+`ltxavatarjob/agentvideo/{videoid}/` folder so `reuse_music_plan=true` can reuse
+newly rendered or explicitly supplied plans without rebuilding them.
 
 All tools return `List[ContentBlock]`. The first block is a `TextContent`
 containing the JSON status contract used for polling. A completed response also

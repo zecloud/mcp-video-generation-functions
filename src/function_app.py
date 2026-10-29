@@ -36,6 +36,7 @@ from models import (
     MusicMessage,
     MusicPlan,
     MusicVideoMessage,
+    MusicVideoStageMessage,
     MusicVideoWorkflowOutput,
     MusicWorkflowOutput,
     TrackSpec,
@@ -61,6 +62,7 @@ from music_video_workflow import (
     aggregate_music_video_results,
     build_music_video_generation,
     music_plan_blob_path,
+    run_music_video_fanout,
     serialize_music_video_message,
 )
 from video_workflow import (
@@ -149,6 +151,8 @@ async def _upload_music_plan(
         request.music_plan.serialize(),
         base_url=VIDEO_BLOB_BASE_URL,
         content_type="application/json",
+        overwrite=False,
+        verify_existing=True,
     )
     logging.info("Uploaded music plan %s", blob_path)
     return request.music_plan_blob_name()
@@ -424,6 +428,7 @@ def run_music_orchestrator(context: df.DurableOrchestrationContext):
 
 @app.orchestration_trigger(context_name="context")
 def run_music_video_orchestrator(context: df.DurableOrchestrationContext):
+    """Conserve le contrat monolithique pour les instances déjà en vol."""
     orchestration_input = context.get_input()
     if not isinstance(orchestration_input, dict):
         raise ValueError("L’entrée d’orchestration doit être un objet JSON.")
@@ -474,6 +479,30 @@ def run_music_video_orchestrator(context: df.DurableOrchestrationContext):
     return result.model_dump(mode="json")
 
 
+@app.orchestration_trigger(context_name="context")
+def run_music_video_orchestrator_v2(context: df.DurableOrchestrationContext):
+    orchestration_input = context.get_input()
+    if not isinstance(orchestration_input, dict):
+        raise ValueError("L’entrée d’orchestration doit être un objet JSON.")
+    terminal_result = orchestration_input.get("terminal_result")
+    if terminal_result is not None:
+        return MusicVideoWorkflowOutput.model_validate(terminal_result).model_dump(
+            mode="json"
+        )
+
+    request = CreateMusicVideoInput.model_validate(orchestration_input["request"])
+    result = yield from run_music_video_fanout(
+        context,
+        request=request,
+        timeout_seconds=int(orchestration_input["timeout_seconds"]),
+        music_plan_blob=orchestration_input.get("music_plan_blob"),
+    )
+    if any(generation.status == "timeout" for generation in result.generations):
+        context.continue_as_new({"terminal_result": result.model_dump(mode="json")})
+        return None
+    return result.model_dump(mode="json")
+
+
 @app.activity_trigger(input_name="job")
 @app.service_bus_queue_output(
     arg_name="message",
@@ -514,6 +543,22 @@ def enqueue_music_generation(job: dict, message: func.Out[str]) -> dict:
 )
 def enqueue_music_video_generation(job: dict, message: func.Out[str]) -> dict:
     body = MusicVideoMessage.model_validate(job["message"])
+    message.set(serialize_music_video_message(body))
+    return {
+        "index": job["index"],
+        "event_key": body.event_key,
+        "dts_event_name": body.dts_event_name,
+    }
+
+
+@app.activity_trigger(input_name="job")
+@app.service_bus_queue_output(
+    arg_name="message",
+    queue_name="%VIDEO_SERVICE_BUS_QUEUE_NAME%",
+    connection="ServiceBusConnection",
+)
+def enqueue_music_video_generation_v2(job: dict, message: func.Out[str]) -> dict:
+    body = MusicVideoStageMessage.model_validate(job["message"])
     message.set(serialize_music_video_message(body))
     return {
         "index": job["index"],
@@ -708,7 +753,7 @@ async def create_music_video(
         # transportent que son nom simple.
         client_input["music_plan_blob"] = await _upload_music_plan(request)
     instance_id = await client.start_new(
-        "run_music_video_orchestrator",
+        "run_music_video_orchestrator_v2",
         client_input=client_input,
     )
     logging.info("Started music video orchestration %s", instance_id)

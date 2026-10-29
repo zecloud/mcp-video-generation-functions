@@ -1,8 +1,13 @@
 import asyncio
 import functools
+import inspect
 import json
+from datetime import timedelta
+from unittest.mock import Mock
 
 import pytest
+from azure.durable_functions import DurableOrchestrationContext, Orchestrator
+from azure.durable_functions.models.history import HistoryEventType
 from pydantic import ValidationError
 
 import function_app
@@ -22,11 +27,14 @@ from models import (
     DTS_INPUT_BUDGET_BYTES,
     MusicPlan,
     MusicVideoMessage,
+    MusicVideoPreparation,
+    MusicVideoStageMessage,
     SERVICE_BUS_BODY_BUDGET_BYTES,
 )
 from music_video_workflow import (
     aggregate_music_video_results,
     build_music_video_generation,
+    build_music_video_stage,
     music_plan_blob_path,
     music_video_artifacts,
     output_blob_path,
@@ -540,7 +548,11 @@ def test_music_plan_upload_targets_the_working_folder_and_returns_the_blob_name(
     request = make_request(music_plan=make_plan(), backgrounds=BACKGROUNDS)
     calls = []
 
-    async def fake_uploader(blob_path, content, *, base_url, content_type):
+    async def fake_uploader(
+        blob_path, content, *, base_url, content_type, overwrite, verify_existing
+    ):
+        assert overwrite is False
+        assert verify_existing is True
         calls.append((blob_path, content, base_url, content_type))
         return f"{base_url}/uploaded"
 
@@ -680,7 +692,7 @@ MUSIC_VIDEO_INPUT = {
 
 
 def music_video_orchestrator_callable():
-    return durable_callable(function_app.run_music_video_orchestrator)
+    return durable_callable(function_app.run_music_video_orchestrator_v2)
 
 
 def music_video_context():
@@ -691,39 +703,335 @@ def music_video_context():
     return context
 
 
-def test_music_video_orchestrator_waits_for_single_event():
-    context = music_video_context()
+PLAN_SNAPSHOT = f"{TRACK}-video-42-{'a' * 64}.musicplan.json"
+PREPARATION = {
+    "music_plan": PLAN_SNAPSHOT,
+    "plan_sha256": "a" * 64,
+    "fps": 24,
+    "total_frames": 121,
+    "scenes": [{"index": 0, "frames": 49}, {"index": 1, "frames": 73}],
+}
+
+
+class MusicVideoContext(FakeContext):
+    def __init__(self, *, failed_scene=None, orchestration_input=None):
+        super().__init__(orchestration_input=orchestration_input or MUSIC_VIDEO_INPUT)
+        self.jobs = []
+        self.failed_scene = failed_scene
+        self.timers = []
+
+    def call_activity(self, name, job):
+        assert name == "enqueue_music_video_generation_v2"
+        self.jobs.append(job)
+        body = MusicVideoStageMessage.model_validate(job["message"])
+        if body.music_video_stage == "scene" and body.music_scene_index == self.failed_scene:
+            return FakeTask("dispatch", body.event_key, "FAILED", RuntimeError("queue down"))
+        return FakeTask("dispatch", body.event_key, "SUCCEEDED", {"index": job["index"]})
+
+    def create_timer(self, deadline):
+        task = super().create_timer(deadline)
+        self.timers.append((deadline, task))
+        return task
+
+
+def drive_music_video(
+    context, *, update_event=None, timeout_stage=None, timeout_scene_index=None
+):
     generator = music_video_orchestrator_callable()(context)
-
     request = next(generator)
-    assert len(request.tasks) == 2
-    request = generator.send(
-        next(task for task in request.tasks if task.name == "dispatch-0")
-    )
-    event = next(task for task in request.tasks if task.kind == "event")
-    assert event.name.startswith("music-video-0-")
-    event.result = {
-        "status": "completed",
-        "event_key": "workflow-1:0:uuid-1",
-        "num_frames": 2000,
-        "music_plan": f"{TRACK}-video-42.musicplan.json",
-    }
+    while True:
+        dispatch = next((task for task in request.tasks if task.kind == "dispatch"), None)
+        if dispatch is not None:
+            winner = dispatch
+        else:
+            event = next(task for task in request.tasks if task.kind == "event")
+            job = next(job["message"] for job in context.jobs
+                       if job["message"]["dts_event_name"] == event.name)
+            stage = job["music_video_stage"]
+            if stage == timeout_stage and (
+                stage != "scene"
+                or timeout_scene_index is None
+                or job["music_scene_index"] == timeout_scene_index
+            ):
+                winner = context.timer
+            else:
+                payload = {"status": "completed", "event_key": job["event_key"]}
+                if stage == "prepare":
+                    payload.update(PREPARATION)
+                elif stage == "scene":
+                    index = job["music_scene_index"]
+                    payload.update(music_scene_index=index,
+                                   num_frames=PREPARATION["scenes"][index]["frames"])
+                else:
+                    payload.update(music_plan=PLAN_SNAPSHOT, num_frames=121)
+                if update_event:
+                    update_event(context, job, payload)
+                event.result = payload
+                winner = event
+        try:
+            request = generator.send(winner)
+        except StopIteration as completed:
+            if context.continued_input:
+                return complete_continued_orchestration(
+                    context, orchestrator=music_video_orchestrator_callable()
+                )
+            return completed.value
 
-    try:
-        generator.send(event)
-    except StopIteration as completed:
-        output = completed.value
-    else:
-        raise AssertionError("The orchestration should have completed.")
 
+def test_music_video_orchestrator_fans_out_longest_first_and_assembles_once():
+    context = MusicVideoContext()
+    output = drive_music_video(context)
+    messages = [job["message"] for job in context.jobs]
+    assert [message["music_video_stage"] for message in messages] == [
+        "prepare", "scene", "scene", "assemble"
+    ]
+    assert [job["index"] for job in context.jobs] == [0, 1, 0, 0]
+    assert [message["music_scene_index"] for message in messages[1:3]] == [1, 0]
+    render_id = messages[0]["render_id"]
+    assert messages[1]["type_prefix"] == f"{render_id}-scene-0001"
+    assert messages[-1]["type_prefix"] == render_id
+    for message in messages[1:]:
+        assert message["music_plan"] == PLAN_SNAPSHOT
+        assert message["plan_sha256"] == "a" * 64
+        assert message["music_plan_source"] == "mcp"
+        assert "scenes" not in message
+        assert message["references"] == messages[0]["references"]
     assert output["music_track"] == TRACK
+    assert len(output["generations"]) == 1
     assert output["generations"][0]["status"] == "completed"
-    assert output["generations"][0]["music_plan"] == (
-        f"{TRACK}-video-42.musicplan.json"
+    assert output["generations"][0]["num_frames"] == 121
+    assert output["generations"][0]["music_plan"] == PLAN_SNAPSHOT
+    assert output["generations"][0]["blob_path"].endswith(f"{render_id}-video-42.mp4")
+    assert len(context.event_tasks) == 4
+    assert all(timer.cancelled for _, timer in context.timers)
+
+
+@pytest.mark.parametrize("stage", ["prepare", "scene", "assemble"])
+def test_music_video_timeout_covers_every_stage_and_keeps_public_shape(stage):
+    context = MusicVideoContext()
+    output = drive_music_video(context, timeout_stage=stage)
+    assert output["generations"][0]["status"] == "timeout"
+    assert len(output["generations"]) == 1
+    assert output["artifacts"]["scenes_srt_path"].endswith(".scenes.srt")
+    if stage != "assemble":
+        assert not any(job["message"]["music_video_stage"] == "assemble" for job in context.jobs)
+
+
+@pytest.mark.parametrize("failure", ["dispatch", "terminal", "wrong-index", "wrong-frames", "wrong-key", "json"])
+def test_partial_scene_failure_never_assembles_or_redispatches_successes(failure):
+    context = MusicVideoContext(failed_scene=0 if failure == "dispatch" else None)
+
+    def update(_context, job, payload):
+        if job["music_video_stage"] != "scene" or job["music_scene_index"] != 0:
+            return
+        if failure == "terminal":
+            payload.update(status="failed", error="GPU failure")
+        elif failure == "wrong-index":
+            payload["music_scene_index"] = 1
+        elif failure == "wrong-frames":
+            payload.update(status="Completed", num_frames=9)
+        elif failure == "wrong-key":
+            payload["event_key"] = "other-workflow"
+        elif failure == "json":
+            payload.clear()
+
+    output = drive_music_video(context, update_event=update)
+    assert output["generations"][0]["status"] == "failed"
+    assert "0 (failed:" in output["generations"][0]["error"]
+    assert len(context.jobs) == 3
+    assert [job["index"] for job in context.jobs[1:]] == [1, 0]
+    if failure == "dispatch":
+        assert "Envoi Service Bus impossible : queue down" in output["generations"][0]["error"]
+
+
+@pytest.mark.parametrize("stage", ["prepare", "scene", "assemble"])
+def test_retryable_failure_waits_without_resending_finished_scenes(stage):
+    context = MusicVideoContext()
+    failures = []
+
+    def update(_context, job, payload):
+        if (
+            job["music_video_stage"] == stage
+            and (stage != "scene" or job["music_scene_index"] == 0)
+            and not failures
+        ):
+            failures.append(0)
+            payload.update(status="failed", retryable=True, error="temporary OOM")
+
+    output = drive_music_video(context, update_event=update)
+    assert output["generations"][0]["status"] == "completed"
+    assert len(context.jobs) == 4
+    assert len(context.event_tasks) == 5
+
+
+def test_partial_timeout_keeps_finished_scene_and_identifies_unfinished_index():
+    context = MusicVideoContext()
+    output = drive_music_video(context, timeout_stage="scene", timeout_scene_index=0)
+    assert output["generations"][0]["status"] == "timeout"
+    assert "0 (timeout:" in output["generations"][0]["error"]
+    assert "1 (" not in output["generations"][0]["error"]
+    assert len(context.jobs) == 3
+
+
+def test_longest_scene_dispatch_failure_keeps_original_index_and_correlation():
+    context = MusicVideoContext(failed_scene=1)
+    output = drive_music_video(context)
+    error = output["generations"][0]["error"]
+    assert "1 (failed: Envoi Service Bus impossible : queue down)" in error
+    assert "0 (" not in error
+    assert len(context.jobs) == 3
+
+
+@pytest.mark.parametrize("invalid", [
+    {"scenes": []},
+    {"scenes": [{"index": 1, "frames": 121}]},
+    {"scenes": [{"index": 0, "frames": 48}]},
+    {"total_frames": 129},
+    {"plan_sha256": "bad-digest"},
+    {"music_plan": "../plan.json"},
+    {"fps": 24.0},
+    {"fps": True},
+    {"scenes": [{"index": False, "frames": 121}]},
+])
+def test_invalid_preparation_never_dispatches_scenes(invalid):
+    context = MusicVideoContext()
+
+    def update(_context, job, payload):
+        if job["music_video_stage"] == "prepare":
+            payload.update(invalid)
+
+    output = drive_music_video(context, update_event=update)
+    assert output["generations"][0]["status"] == "failed"
+    assert "Manifest" in output["generations"][0]["error"]
+    assert len(context.jobs) == 1
+
+
+@pytest.mark.parametrize("invalid", [{"num_frames": 129}, {"music_plan": "other.musicplan.json"}])
+def test_invalid_assembly_result_is_not_reported_as_success(invalid):
+    context = MusicVideoContext()
+
+    def update(_context, job, payload):
+        if job["music_video_stage"] == "assemble":
+            payload.update(invalid)
+
+    output = drive_music_video(context, update_event=update)
+    assert output["generations"][0]["status"] == "failed"
+    assert "Assemblage" in output["generations"][0]["error"]
+
+
+def test_music_video_has_one_global_deadline_not_a_fresh_budget_per_stage():
+    context = MusicVideoContext()
+
+    def update(context, _job, _payload):
+        context.current_utc_datetime += timedelta(seconds=5)
+
+    drive_music_video(context, update_event=update)
+    assert len(context.timers) == 3
+    assert len({deadline for deadline, _ in context.timers}) == 1
+
+
+def test_budget_exhaustion_after_prepare_dispatches_no_gpu_work():
+    context = MusicVideoContext()
+
+    def update(context, job, _payload):
+        if job["music_video_stage"] == "prepare":
+            context.current_utc_datetime += timedelta(seconds=14401)
+
+    output = drive_music_video(context, update_event=update)
+    assert output["generations"][0]["status"] == "timeout"
+    assert len(context.jobs) == 1
+
+
+def test_stage_envelope_addresses_uploaded_and_reused_plans_explicitly():
+    request = make_request(music_plan=make_plan(), backgrounds=BACKGROUNDS)
+    _, supplied = build_music_video_stage(
+        request, instance_id="workflow", stage="prepare",
+        music_plan_blob=request.music_plan_blob_name(),
     )
-    assert output["generations"][0]["blob_path"].endswith("-video-42.mp4")
-    assert len(context.event_tasks) == 1
-    assert context.timer.cancelled
+    assert supplied.music_plan_source == "mcp"
+    assert supplied.music_plan == request.music_plan_blob_name()
+    _, reused = build_music_video_stage(
+        make_request(reuse_music_plan=True), instance_id="workflow", stage="prepare",
+    )
+    assert reused.music_plan_source == "legacy"
+    assert reused.music_plan is True
+    first, first_message = build_music_video_stage(
+        make_request(), instance_id="workflow", stage="scene", index=1,
+        preparation=MusicVideoPreparation.model_validate(PREPARATION),
+    )
+    replay, replay_message = build_music_video_stage(
+        make_request(), instance_id="workflow", stage="scene", index=1,
+        preparation=MusicVideoPreparation.model_validate(PREPARATION),
+    )
+    assert first == replay
+    assert first_message == replay_message
+
+
+@pytest.mark.parametrize("overrides", [
+    {"music_video_contract": True},
+    {"music_video_contract": 2},
+    {"music_scene_index": None},
+    {"music_scene_index": True},
+    {"music_scene_index": 0},
+    {"music_video_stage": "assemble"},
+    {"music_plan_source": "legacy"},
+    {"music_plan": True},
+    {"plan_sha256": None},
+    {"transition_keyframes": []},
+])
+def test_invalid_stage_envelopes_fail_explicitly(overrides):
+    _, message = build_music_video_stage(
+        make_request(), instance_id="workflow", stage="scene", index=1,
+        preparation=MusicVideoPreparation.model_validate(PREPARATION),
+    )
+    with pytest.raises(ValidationError):
+        MusicVideoStageMessage.model_validate({
+            **message.model_dump(exclude_none=True), **overrides
+        })
+
+
+@pytest.mark.parametrize("as_string", [False, True])
+def test_public_mcp_uploads_plan_before_starting_and_excludes_it_from_dts(monkeypatch, as_string):
+    calls = []
+
+    async def upload(path, content, **kwargs):
+        assert kwargs["overwrite"] is False
+        assert kwargs["verify_existing"] is True
+        calls.append(("upload", path, content))
+        return path
+
+    class Client:
+        async def start_new(self, name, *, client_input):
+            calls.append(("start", name, client_input))
+            return "workflow"
+
+    async def wait(*args, **kwargs):
+        return None
+
+    async def blocks(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(function_app, "upload_media_blob", upload)
+    monkeypatch.setattr(function_app, "_wait_for_workflow", wait)
+    monkeypatch.setattr(function_app, "_to_content_blocks", blocks)
+    trigger = function_app.create_music_video._function._func
+    durable_wrapper = inspect.getclosurevars(trigger).nonlocals["target_func"]
+    validated_wrapper = inspect.getclosurevars(durable_wrapper).nonlocals["user_code"]
+    plan = make_plan()
+    request = make_request(music_plan=plan, backgrounds=BACKGROUNDS)
+    payload = request.model_dump(mode="json", exclude_none=True)
+    if as_string:
+        payload.update(music_plan=json.dumps(plan), backgrounds=json.dumps(BACKGROUNDS))
+    asyncio.run(validated_wrapper(client=Client(), **payload))
+    assert [call[0] for call in calls] == ["upload", "start"]
+    assert calls[0][1] == f"video/video-42/{request.music_plan_blob_name()}"
+    assert json.loads(calls[0][2]) == json.loads(request.music_plan.serialize())
+    assert calls[1][1] == "run_music_video_orchestrator_v2"
+    client_input = calls[1][2]
+    assert client_input["music_plan_blob"] == request.music_plan_blob_name()
+    assert "music_plan" not in client_input["request"]
+    assert client_input["timeout_seconds"] == 14400
+    assert not any(name.startswith("music_video_") for name in client_input["request"])
 
 
 def test_music_video_orchestration_timeout_continues_as_new():
@@ -749,6 +1057,129 @@ def test_music_video_orchestration_timeout_continues_as_new():
 def test_music_video_timeout_defaults_to_four_hours():
     assert MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS == 4 * 60 * 60
     assert ORCHESTRATION_TIMEOUT_SECONDS == 2 * 60 * 60
+
+
+LEGACY_EVENT_KEY = "workflow-1:0:9aa63d0e-2a0f-5d1a-b2fd-340ee06b796a"
+LEGACY_EVENT_NAME = "music-video-0-256103f0-e502-525d-95cf-2f6a450f386e"
+
+
+def replay_legacy_history(*, dispatched, completion=None):
+    def event(event_type, event_id, **fields):
+        return {
+            "EventType": int(event_type), "EventId": event_id,
+            "IsPlayed": True, "Timestamp": "2026-08-26T00:00:00Z",
+            **fields,
+        }
+
+    history = [
+        event(HistoryEventType.ORCHESTRATOR_STARTED, -1),
+        event(
+            HistoryEventType.EXECUTION_STARTED, -1, Version="",
+            Name="run_music_video_orchestrator", Input=json.dumps(MUSIC_VIDEO_INPUT),
+        ),
+    ]
+    if dispatched:
+        history.extend([
+            event(HistoryEventType.TIMER_CREATED, 0, FireAt="2026-08-26T04:00:00Z"),
+            event(
+                HistoryEventType.TASK_SCHEDULED, 1,
+                Name="enqueue_music_video_generation",
+            ),
+            event(
+                HistoryEventType.TASK_COMPLETED, 2, TaskScheduledId=1,
+                Result=json.dumps({
+                    "index": 0, "event_key": LEGACY_EVENT_KEY,
+                    "dts_event_name": LEGACY_EVENT_NAME,
+                }),
+            ),
+        ])
+    if completion is not None:
+        history.append(event(
+            HistoryEventType.EVENT_RAISED, 3,
+            Name=LEGACY_EVENT_NAME, Input=json.dumps(completion),
+        ))
+    context = DurableOrchestrationContext(
+        history=history, instanceId="workflow-1", parentInstanceId=None,
+        isReplaying=True, input=json.dumps(MUSIC_VIDEO_INPUT),
+    )
+    return json.loads(Orchestrator(
+        durable_callable(function_app.run_music_video_orchestrator)
+    ).handle(context))
+
+
+@pytest.mark.parametrize("dispatched", [False, True])
+def test_legacy_replay_preserves_pending_activity_payload_and_event_name(dispatched):
+    state = replay_legacy_history(dispatched=dispatched)
+    assert state["isDone"] is False
+    actions = [action for batch in state["actions"] for action in batch]
+    assert actions[0]["actionType"] == 5  # Timer retains its historical task ID.
+    dispatch = actions[1]
+    assert dispatch["functionName"] == "enqueue_music_video_generation"
+    message = json.loads(dispatch["input"])["message"]
+    assert message["event_key"] == LEGACY_EVENT_KEY
+    assert message["dts_event_name"] == LEGACY_EVENT_NAME
+    assert "music_video_stage" not in message
+    assert "music_video_contract" not in message
+
+
+def test_legacy_replay_consumes_old_worker_callback_and_completes_final_clip():
+    state = replay_legacy_history(dispatched=True, completion={
+        "status": "completed", "event_key": LEGACY_EVENT_KEY,
+        "num_frames": 2000, "music_plan": f"{TRACK}-video-42.musicplan.json",
+    })
+    assert state["isDone"] is True
+    generation = state["output"]["generations"][0]
+    assert generation["status"] == "completed"
+    assert generation["num_frames"] == 2000
+    assert generation["music_plan"] == f"{TRACK}-video-42.musicplan.json"
+    assert len(state["output"]["generations"]) == 1
+    assert "music-video-prepare" not in json.dumps(state)
+
+
+def test_legacy_timeout_continuation_remains_replayable():
+    context = music_video_context()
+    legacy = durable_callable(function_app.run_music_video_orchestrator)
+    generator = legacy(context)
+    request = next(generator)
+    generator.send(next(task for task in request.tasks if task.kind == "dispatch"))
+    assert context.event_tasks[0].name == "music-video-0-uuid-2"
+    with pytest.raises(StopIteration):
+        generator.send(context.timer)
+    output = complete_continued_orchestration(context, orchestrator=legacy)
+    assert output["generations"][0]["status"] == "timeout"
+
+
+def test_legacy_enqueue_accepts_pending_payload_without_stage_fields():
+    descriptor, body = build(
+        event_key=LEGACY_EVENT_KEY,
+    )
+    pending = {"index": descriptor.index, "message": body.model_dump(
+        mode="json", exclude_none=True
+    )}
+    message = Mock(spec=function_app.func.Out)
+    activity = function_app.enqueue_music_video_generation._function._func
+    result = activity(pending, message)
+    assert json.loads(message.set.call_args.args[0]) == pending["message"]
+    assert result == {
+        "index": 0, "event_key": LEGACY_EVENT_KEY,
+        "dts_event_name": body.dts_event_name,
+    }
+
+
+def test_versioned_enqueue_accepts_stages_without_weakening_legacy_validation():
+    descriptor, body = build_music_video_stage(
+        make_request(), instance_id="workflow", stage="prepare",
+    )
+    job = {"index": descriptor.index, "message": body.model_dump(
+        mode="json", exclude_none=True
+    )}
+    message = Mock(spec=function_app.func.Out)
+    activity = function_app.enqueue_music_video_generation_v2._function._func
+    result = activity(job, message)
+    assert json.loads(message.set.call_args.args[0]) == job["message"]
+    assert result["event_key"] == body.event_key
+    with pytest.raises(ValidationError):
+        function_app.enqueue_music_video_generation._function._func(job, message)
 
 
 # --- Résultats MCP ---------------------------------------------------------
@@ -861,15 +1292,18 @@ def test_music_video_tools_are_registered_alongside_existing_tools():
         "get_music_video_result",
         "run_music_video_orchestrator",
         "enqueue_music_video_generation",
+        "run_music_video_orchestrator_v2",
+        "enqueue_music_video_generation_v2",
     ):
         assert name in bindings
 
-    queues = [
-        binding["queueName"]
-        for binding in bindings["enqueue_music_video_generation"]
-        if binding.get("type") == "serviceBus"
-    ]
-    assert queues == ["%VIDEO_SERVICE_BUS_QUEUE_NAME%"]
+    for name in ("enqueue_music_video_generation", "enqueue_music_video_generation_v2"):
+        queues = [
+            binding["queueName"]
+            for binding in bindings[name]
+            if binding.get("type") == "serviceBus"
+        ]
+        assert queues == ["%VIDEO_SERVICE_BUS_QUEUE_NAME%"]
 
     trigger = next(
         binding
