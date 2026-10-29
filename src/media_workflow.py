@@ -212,6 +212,10 @@ def run_media_orchestration(
     Générateur Durable destiné à être délégué avec ``yield from``. Retourne le
     triplet ``(descriptors, event_payloads, timed_out_indexes)``.
     """
+    # Garder le timer avant les activités/UUID pour le replay des historiques v1.
+    if timeout_seconds > 0:
+        deadline = context.current_utc_datetime + timedelta(seconds=timeout_seconds)
+        timeout_task = context.create_timer(deadline)
     descriptors, dispatch_payloads = build_dispatch()
     descriptors_by_index = {descriptor.index: descriptor for descriptor in descriptors}
     dispatch_indexes = [payload["index"] for payload in dispatch_payloads]
@@ -223,8 +227,6 @@ def run_media_orchestration(
         raise ValueError("Les activités doivent correspondre aux index des générations.")
     if timeout_seconds <= 0:
         return descriptors, {}, set(descriptors_by_index)
-    deadline = context.current_utc_datetime + timedelta(seconds=timeout_seconds)
-    timeout_task = context.create_timer(deadline)
     dispatch_tasks = [
         context.call_activity(activity_name, payload)
         for payload in dispatch_payloads

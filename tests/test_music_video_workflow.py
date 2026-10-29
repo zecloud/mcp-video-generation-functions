@@ -3,8 +3,11 @@ import functools
 import inspect
 import json
 from datetime import timedelta
+from unittest.mock import Mock
 
 import pytest
+from azure.durable_functions import DurableOrchestrationContext, Orchestrator
+from azure.durable_functions.models.history import HistoryEventType
 from pydantic import ValidationError
 
 import function_app
@@ -689,7 +692,7 @@ MUSIC_VIDEO_INPUT = {
 
 
 def music_video_orchestrator_callable():
-    return durable_callable(function_app.run_music_video_orchestrator)
+    return durable_callable(function_app.run_music_video_orchestrator_v2)
 
 
 def music_video_context():
@@ -718,7 +721,7 @@ class MusicVideoContext(FakeContext):
         self.timers = []
 
     def call_activity(self, name, job):
-        assert name == "enqueue_music_video_generation"
+        assert name == "enqueue_music_video_generation_v2"
         self.jobs.append(job)
         body = MusicVideoStageMessage.model_validate(job["message"])
         if body.music_video_stage == "scene" and body.music_scene_index == self.failed_scene:
@@ -1023,7 +1026,7 @@ def test_public_mcp_uploads_plan_before_starting_and_excludes_it_from_dts(monkey
     assert [call[0] for call in calls] == ["upload", "start"]
     assert calls[0][1] == f"video/video-42/{request.music_plan_blob_name()}"
     assert json.loads(calls[0][2]) == json.loads(request.music_plan.serialize())
-    assert calls[1][1] == "run_music_video_orchestrator"
+    assert calls[1][1] == "run_music_video_orchestrator_v2"
     client_input = calls[1][2]
     assert client_input["music_plan_blob"] == request.music_plan_blob_name()
     assert "music_plan" not in client_input["request"]
@@ -1054,6 +1057,129 @@ def test_music_video_orchestration_timeout_continues_as_new():
 def test_music_video_timeout_defaults_to_four_hours():
     assert MUSIC_VIDEO_ORCHESTRATION_TIMEOUT_SECONDS == 4 * 60 * 60
     assert ORCHESTRATION_TIMEOUT_SECONDS == 2 * 60 * 60
+
+
+LEGACY_EVENT_KEY = "workflow-1:0:9aa63d0e-2a0f-5d1a-b2fd-340ee06b796a"
+LEGACY_EVENT_NAME = "music-video-0-256103f0-e502-525d-95cf-2f6a450f386e"
+
+
+def replay_legacy_history(*, dispatched, completion=None):
+    def event(event_type, event_id, **fields):
+        return {
+            "EventType": int(event_type), "EventId": event_id,
+            "IsPlayed": True, "Timestamp": "2026-08-26T00:00:00Z",
+            **fields,
+        }
+
+    history = [
+        event(HistoryEventType.ORCHESTRATOR_STARTED, -1),
+        event(
+            HistoryEventType.EXECUTION_STARTED, -1, Version="",
+            Name="run_music_video_orchestrator", Input=json.dumps(MUSIC_VIDEO_INPUT),
+        ),
+    ]
+    if dispatched:
+        history.extend([
+            event(HistoryEventType.TIMER_CREATED, 0, FireAt="2026-08-26T04:00:00Z"),
+            event(
+                HistoryEventType.TASK_SCHEDULED, 1,
+                Name="enqueue_music_video_generation",
+            ),
+            event(
+                HistoryEventType.TASK_COMPLETED, 2, TaskScheduledId=1,
+                Result=json.dumps({
+                    "index": 0, "event_key": LEGACY_EVENT_KEY,
+                    "dts_event_name": LEGACY_EVENT_NAME,
+                }),
+            ),
+        ])
+    if completion is not None:
+        history.append(event(
+            HistoryEventType.EVENT_RAISED, 3,
+            Name=LEGACY_EVENT_NAME, Input=json.dumps(completion),
+        ))
+    context = DurableOrchestrationContext(
+        history=history, instanceId="workflow-1", parentInstanceId=None,
+        isReplaying=True, input=json.dumps(MUSIC_VIDEO_INPUT),
+    )
+    return json.loads(Orchestrator(
+        durable_callable(function_app.run_music_video_orchestrator)
+    ).handle(context))
+
+
+@pytest.mark.parametrize("dispatched", [False, True])
+def test_legacy_replay_preserves_pending_activity_payload_and_event_name(dispatched):
+    state = replay_legacy_history(dispatched=dispatched)
+    assert state["isDone"] is False
+    actions = [action for batch in state["actions"] for action in batch]
+    assert actions[0]["actionType"] == 5  # Timer retains its historical task ID.
+    dispatch = actions[1]
+    assert dispatch["functionName"] == "enqueue_music_video_generation"
+    message = json.loads(dispatch["input"])["message"]
+    assert message["event_key"] == LEGACY_EVENT_KEY
+    assert message["dts_event_name"] == LEGACY_EVENT_NAME
+    assert "music_video_stage" not in message
+    assert "music_video_contract" not in message
+
+
+def test_legacy_replay_consumes_old_worker_callback_and_completes_final_clip():
+    state = replay_legacy_history(dispatched=True, completion={
+        "status": "completed", "event_key": LEGACY_EVENT_KEY,
+        "num_frames": 2000, "music_plan": f"{TRACK}-video-42.musicplan.json",
+    })
+    assert state["isDone"] is True
+    generation = state["output"]["generations"][0]
+    assert generation["status"] == "completed"
+    assert generation["num_frames"] == 2000
+    assert generation["music_plan"] == f"{TRACK}-video-42.musicplan.json"
+    assert len(state["output"]["generations"]) == 1
+    assert "music-video-prepare" not in json.dumps(state)
+
+
+def test_legacy_timeout_continuation_remains_replayable():
+    context = music_video_context()
+    legacy = durable_callable(function_app.run_music_video_orchestrator)
+    generator = legacy(context)
+    request = next(generator)
+    generator.send(next(task for task in request.tasks if task.kind == "dispatch"))
+    assert context.event_tasks[0].name == "music-video-0-uuid-2"
+    with pytest.raises(StopIteration):
+        generator.send(context.timer)
+    output = complete_continued_orchestration(context, orchestrator=legacy)
+    assert output["generations"][0]["status"] == "timeout"
+
+
+def test_legacy_enqueue_accepts_pending_payload_without_stage_fields():
+    descriptor, body = build(
+        event_key=LEGACY_EVENT_KEY,
+    )
+    pending = {"index": descriptor.index, "message": body.model_dump(
+        mode="json", exclude_none=True
+    )}
+    message = Mock(spec=function_app.func.Out)
+    activity = function_app.enqueue_music_video_generation._function._func
+    result = activity(pending, message)
+    assert json.loads(message.set.call_args.args[0]) == pending["message"]
+    assert result == {
+        "index": 0, "event_key": LEGACY_EVENT_KEY,
+        "dts_event_name": body.dts_event_name,
+    }
+
+
+def test_versioned_enqueue_accepts_stages_without_weakening_legacy_validation():
+    descriptor, body = build_music_video_stage(
+        make_request(), instance_id="workflow", stage="prepare",
+    )
+    job = {"index": descriptor.index, "message": body.model_dump(
+        mode="json", exclude_none=True
+    )}
+    message = Mock(spec=function_app.func.Out)
+    activity = function_app.enqueue_music_video_generation_v2._function._func
+    result = activity(job, message)
+    assert json.loads(message.set.call_args.args[0]) == job["message"]
+    assert result["event_key"] == body.event_key
+    with pytest.raises(ValidationError):
+        function_app.enqueue_music_video_generation._function._func(job, message)
 
 
 # --- Résultats MCP ---------------------------------------------------------
@@ -1166,15 +1292,18 @@ def test_music_video_tools_are_registered_alongside_existing_tools():
         "get_music_video_result",
         "run_music_video_orchestrator",
         "enqueue_music_video_generation",
+        "run_music_video_orchestrator_v2",
+        "enqueue_music_video_generation_v2",
     ):
         assert name in bindings
 
-    queues = [
-        binding["queueName"]
-        for binding in bindings["enqueue_music_video_generation"]
-        if binding.get("type") == "serviceBus"
-    ]
-    assert queues == ["%VIDEO_SERVICE_BUS_QUEUE_NAME%"]
+    for name in ("enqueue_music_video_generation", "enqueue_music_video_generation_v2"):
+        queues = [
+            binding["queueName"]
+            for binding in bindings[name]
+            if binding.get("type") == "serviceBus"
+        ]
+        assert queues == ["%VIDEO_SERVICE_BUS_QUEUE_NAME%"]
 
     trigger = next(
         binding

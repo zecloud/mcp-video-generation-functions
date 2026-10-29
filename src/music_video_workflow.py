@@ -232,7 +232,7 @@ def run_music_video_fanout(
             context,
             timeout_seconds=(deadline - context.current_utc_datetime).total_seconds(),
             build_dispatch=lambda: (descriptors, payloads),
-            activity_name="enqueue_music_video_generation",
+            activity_name="enqueue_music_video_generation_v2",
         ))
 
     prepare_job = build_music_video_stage(

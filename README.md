@@ -285,6 +285,18 @@ VideoPlan and YuE2 generation messages are unchanged. A compatible worker must
 implement all three stages before rollout; no deployment or GPU acceptance is
 performed here.
 
+**Durable rollout compatibility:** new `create_music_video` calls start
+`run_music_video_orchestrator_v2`, which dispatches only through
+`enqueue_music_video_generation_v2`. Keep the original
+`run_music_video_orchestrator` and `enqueue_music_video_generation` registered
+for in-flight monolithic workflows: they retain their original unversioned
+message schema, deterministic UUIDs, `music-video-0-<uuid>` callbacks and
+terminal timeout continuations. Existing instances are not migrated to staged
+execution, and polling remains unchanged for both versions. Workers must
+continue accepting legacy music messages alongside staged v1 messages until
+those old instances and pending queue deliveries have drained; do not remove
+the legacy functions before that drain is confirmed.
+
 Every message retains the existing `videoid`, `music_track`, `references`,
 `width`, `height`, `type_prefix`, `instance_id`, `event_key`, `dts_event_name`,
 `seed` and supplied music options. `render_id` is the final music-video
