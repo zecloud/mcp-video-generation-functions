@@ -203,7 +203,7 @@ DispatchBuilder = Callable[
 def run_media_orchestration(
     context,
     *,
-    timeout_seconds: int,
+    timeout_seconds: int | float,
     build_dispatch: DispatchBuilder,
     activity_name: str,
 ):
@@ -212,17 +212,26 @@ def run_media_orchestration(
     Générateur Durable destiné à être délégué avec ``yield from``. Retourne le
     triplet ``(descriptors, event_payloads, timed_out_indexes)``.
     """
+    descriptors, dispatch_payloads = build_dispatch()
+    descriptors_by_index = {descriptor.index: descriptor for descriptor in descriptors}
+    dispatch_indexes = [payload["index"] for payload in dispatch_payloads]
+    if (
+        len(descriptors_by_index) != len(descriptors)
+        or len(set(dispatch_indexes)) != len(dispatch_indexes)
+        or set(dispatch_indexes) != set(descriptors_by_index)
+    ):
+        raise ValueError("Les activités doivent correspondre aux index des générations.")
+    if timeout_seconds <= 0:
+        return descriptors, {}, set(descriptors_by_index)
     deadline = context.current_utc_datetime + timedelta(seconds=timeout_seconds)
     timeout_task = context.create_timer(deadline)
-
-    descriptors, dispatch_payloads = build_dispatch()
     dispatch_tasks = [
         context.call_activity(activity_name, payload)
         for payload in dispatch_payloads
     ]
 
     event_payloads: dict[int, Any] = {}
-    pending_dispatches = list(enumerate(dispatch_tasks))
+    pending_dispatches = list(zip(dispatch_indexes, dispatch_tasks))
     while pending_dispatches:
         winner = yield context.task_any(
             [timeout_task, *[task for _, task in pending_dispatches]]
@@ -245,7 +254,7 @@ def run_media_orchestration(
                     error = winner.result
                     event_payloads[index] = {
                         "status": "failed",
-                        "event_key": descriptors[index].event_key,
+                        "event_key": descriptors_by_index[index].event_key,
                         "error": f"Envoi Service Bus impossible : {error}",
                     }
                 pending_dispatches.pop(position)
@@ -275,7 +284,7 @@ def run_media_orchestration(
                 event_payloads[index] = event_task.result
                 if is_retryable_failure_event(
                     event_task.result,
-                    descriptors[index].event_key,
+                    descriptors_by_index[index].event_key,
                 ):
                     pending_events[position] = (
                         index,

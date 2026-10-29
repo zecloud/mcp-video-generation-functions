@@ -35,7 +35,7 @@ from models import (
     HDVideoWorkflowOutput,
     MusicMessage,
     MusicPlan,
-    MusicVideoMessage,
+    MusicVideoStageMessage,
     MusicVideoWorkflowOutput,
     MusicWorkflowOutput,
     TrackSpec,
@@ -57,10 +57,8 @@ from music_workflow import (
     serialize_music_message,
 )
 from music_video_workflow import (
-    MUSIC_VIDEO_GENERATION_INDEX,
-    aggregate_music_video_results,
-    build_music_video_generation,
     music_plan_blob_path,
+    run_music_video_fanout,
     serialize_music_video_message,
 )
 from video_workflow import (
@@ -149,6 +147,8 @@ async def _upload_music_plan(
         request.music_plan.serialize(),
         base_url=VIDEO_BLOB_BASE_URL,
         content_type="application/json",
+        overwrite=False,
+        verify_existing=True,
     )
     logging.info("Uploaded music plan %s", blob_path)
     return request.music_plan_blob_name()
@@ -434,41 +434,13 @@ def run_music_video_orchestrator(context: df.DurableOrchestrationContext):
         )
 
     request = CreateMusicVideoInput.model_validate(orchestration_input["request"])
-    music_plan_blob = orchestration_input.get("music_plan_blob")
-    instance_id = context.instance_id
-
-    def build_dispatch():
-        index = MUSIC_VIDEO_GENERATION_INDEX
-        event_key = f"{instance_id}:{index}:{context.new_uuid()}"
-        dts_event_name = f"music-video-{index}-{context.new_uuid()}"
-        descriptor, message = build_music_video_generation(
-            request,
-            instance_id=instance_id,
-            event_key=event_key,
-            dts_event_name=dts_event_name,
-            music_plan_blob=music_plan_blob,
-        )
-        return [descriptor], [
-            {
-                "index": index,
-                "message": message.model_dump(mode="json", exclude_none=True),
-            }
-        ]
-
-    descriptors, event_payloads, timed_out_indexes = yield from run_media_orchestration(
+    result = yield from run_music_video_fanout(
         context,
-        timeout_seconds=int(orchestration_input["timeout_seconds"]),
-        build_dispatch=build_dispatch,
-        activity_name="enqueue_music_video_generation",
-    )
-
-    result = aggregate_music_video_results(
         request=request,
-        descriptors=descriptors,
-        event_payloads=event_payloads,
-        timed_out_indexes=timed_out_indexes,
+        timeout_seconds=int(orchestration_input["timeout_seconds"]),
+        music_plan_blob=orchestration_input.get("music_plan_blob"),
     )
-    if timed_out_indexes:
+    if any(generation.status == "timeout" for generation in result.generations):
         context.continue_as_new({"terminal_result": result.model_dump(mode="json")})
         return None
     return result.model_dump(mode="json")
@@ -513,7 +485,7 @@ def enqueue_music_generation(job: dict, message: func.Out[str]) -> dict:
     connection="ServiceBusConnection",
 )
 def enqueue_music_video_generation(job: dict, message: func.Out[str]) -> dict:
-    body = MusicVideoMessage.model_validate(job["message"])
+    body = MusicVideoStageMessage.model_validate(job["message"])
     message.set(serialize_music_video_message(body))
     return {
         "index": job["index"],
